@@ -1,4 +1,4 @@
-# Feature Specification: ehgraph MVP — durable property graph with versioned snapshots and session-scoped shared-memory graphs
+# Feature Specification: ehgraph MVP — a topology database server: durable property graphs, versioned snapshots and session-scoped shared-memory graphs
 
 **Feature Branch**: `001-ehgraph-mvp` (tracked on git branch `spec/initial`)
 
@@ -11,6 +11,19 @@ database to store network topology graph and be able to load it to the shared me
 user session requests to read it and keep it in shared memory until the session ends."
 The user chose to **build** it because "we need graph database anyway". They named it
 **ehgraph** (Event Horizon Graph) and created <https://github.com/noetl/ehgraph>.
+
+**Product decision** (user, 2026-11-03): "let's have ehgraph as database that used for
+topology - it can be noetl services / cluster topology or network topology but i think it
+should be a separate database - not a library. single instance - so we can have many
+instances if needed for different purposes. not sure though what design is better single
+instance or distrbuted multiple instance or replicated." What this spec takes from that:
+
+- ehgraph is a **topology database server**, not a library (constitution 2.0.0, Principle I).
+- Each instance serves one **topology domain**. Examples:
+  - `noetl-cluster`: NoETL services and cluster topology
+  - `network`: network topology, used by qnetmon
+- The MVP instance is a single primary. Replicas are the planned next stage, and sharding
+  is deferred. The comparison and the open final choice are in research R4 and Q18.
 
 **Origin**: this spec carries over the graph-database MVP first written in qnetmon
 (`shastaranch/qnetmon`, `specs/001-noetl-network-monitor`, branch `spec/noetl-core`):
@@ -31,7 +44,12 @@ wiki holds a default Home page (`2b932f2`).
 ## User Scenarios & Testing *(mandatory)*
 
 "Consumer" means a NoETL playbook, an agent tool or an MCP client acting for a NoETL
-application (qnetmon is the first).
+application. Expected first consumers:
+
+- a NoETL services/cluster topology (domain `noetl-cluster`)
+- qnetmon's network topology (domain `network`)
+
+"Instance" means one running ehgraph database server, which serves one topology domain.
 
 ### User Story 1 - Write a graph durably and idempotently (Priority: P1)
 
@@ -110,11 +128,16 @@ after the idle timeout.
 5. **Given** the memory budget is exhausted, **When** a new session asks to load,
    **Then** the response is explicit (FR-016). No active session is silently evicted.
 
-### User Story 4 - Operate ehgraph as a NoETL catalog resource (Priority: P2)
+### User Story 4 - Operate ehgraph instances as NoETL catalog resources (Priority: P2)
 
-An operator registers ehgraph as a `kind: Mcp` catalog resource and runs its lifecycle
-playbooks (deploy, status, discover, undeploy). Health and metrics show sessions,
-resident bytes, load latency and versions.
+An operator deploys one ehgraph instance per topology domain, for example
+`ehgraph-noetl-cluster` and `ehgraph-network`.
+
+- Each instance is registered as its own `kind: Mcp` catalog resource and runs the shared
+  lifecycle playbooks (deploy, status, discover, backup, restore, undeploy), parameterized
+  by instance.
+- Health and metrics show the instance identity, sessions, resident bytes, load latency
+  and versions.
 
 **Why this priority**: this is needed for shared environments. For a laptop, a local
 process is enough (FR-009).
@@ -126,8 +149,13 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 
 1. **Given** the resource is registered, **When** `deploy` then `status` run, **Then**
    status is healthy and `discover` lists the tools in contracts/graphdb.md.
-2. **Given** a running service, **When** sessions open and close, **Then** the metrics
+2. **Given** a running instance, **When** sessions open and close, **Then** the metrics
    for sessions and resident bytes move accordingly.
+3. **Given** two instances for different domains, **When** one is written, undeployed or
+   restored, **Then** the other's data, versions and sessions are unaffected.
+4. **Given** an instance with a backup in the object store, **When** its volume is
+   discarded and `restore` runs, **Then** every namespace comes back at the backed-up
+   `graph_version`, and later writes continue from that version.
 
 ### Edge Cases
 
@@ -176,8 +204,8 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   or also an openCypher/GQL subset?]
 - **FR-006**: **NoETL exposure**: the API MUST be exposed as MCP tools (`tools/list`,
   `tools/call`) callable with `kind: mcp`, and over HTTP. Agent tools bind to read-only
-  sub-playbooks that call it. ehgraph is registered as a `kind: Mcp` catalog resource
-  with lifecycle playbooks. [NEEDS CLARIFICATION: should it also become a first-class
+  sub-playbooks that call it. **Each instance** is registered as its own `kind: Mcp`
+  catalog resource with lifecycle playbooks (FR-023). [NEEDS CLARIFICATION: should it also become a first-class
   NoETL tool kind (e.g. `kind: graph`) in noetl-tools?]
 - **FR-007**: **Writes**: batch upsert and deactivate of nodes and edges, idempotent by
   stable id and an optional client idempotency key, returning the new `graph_version`.
@@ -190,6 +218,39 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   for sessions, resident bytes, load latency, evictions and versions. [NEEDS
   CLARIFICATION: deployment targets for the MVP — Kubernetes only, or also a local
   process for laptop runs (`noetl run --runtime local`)?]
+
+**Topology database server and instances**
+
+- **FR-021**: **Standalone server**: ehgraph MUST ship as a database server: one binary
+  and container image, with its own durable volume.
+  - Consumers MUST reach it only over the MCP/HTTP API.
+  - Embedding it as a library in a consumer process is not a supported mode.
+- **FR-022**: **Instance and domain identity**: each instance MUST be configured with:
+  - a stable `instance_id`
+  - one `domain` label (e.g. `noetl-cluster`, `network`)
+  - its own data directory and object-store prefix
+
+  Every response and every metric carries `instance_id` and `domain`. Instances share no
+  state, and a write, restore or undeploy on one MUST NOT affect another. Namespaces are
+  unique within an instance.
+- **FR-023**: **Instance addressing**: each instance MUST be registered as one `kind: Mcp`
+  resource, named `ehgraph-<domain>` with path `mcp/ehgraph/<domain>`.
+  - The resource holds the instance's own URL and `deployment.namespace`.
+  - Lifecycle playbooks are shared and take the instance as a parameter.
+  - Consumers select an instance only by its catalog resource. ehgraph has no
+    cross-instance routing.
+- **FR-024**: **Backup and restore**: an instance MUST ship its sealed change-log parts,
+  snapshots and manifest to an object store under its own prefix.
+  - It MUST be able to restore every namespace from that prefix into an empty volume, at
+  the last backed-up `graph_version`.
+  - Backup lag (the RPO) MUST be exposed as a metric. [NEEDS CLARIFICATION: target RPO and
+  RTO per domain, and the object store (GCS, S3-compatible, or a mounted volume for local
+  runs).]
+- **FR-025**: **Single writer**: exactly one process accepts writes for an instance.
+  - The MVP enforces this with one replica plus a data-directory lock, and a second
+    process on the same data directory MUST refuse to start.
+  - Read replicas or a standby are a later stage (research R4). They MUST NOT be enabled
+    until election plus store-side fencing are in place.
 
 **Session-scoped shared-memory graph**
 
@@ -241,7 +302,10 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 
 ### Key Entities
 
-- **Namespace**: an isolated graph with its own `graph_version` sequence, schema config
+- **Instance**: one running ehgraph server. Attributes: `instance_id`, `domain`, data
+  directory, object-store prefix, role (`primary`; later `replica`/`standby`), and
+  budgets.
+- **Namespace**: within an instance, an isolated graph with its own `graph_version` sequence, schema config
   (FR-001) and access grants.
 - **Node / Edge**: stable id, type, props, soft history, provenance, and the versions in
   which it was created and updated.
@@ -250,7 +314,7 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - **Snapshot**: an immutable image of a namespace or scope at a `graph_version`, listed in
   the manifest.
 - **GraphSession**: id, owner, scope, pinned version, state, timestamps, idle and maximum
-  lifetime, resident bytes, and the host node.
+  lifetime, resident bytes, and the serving instance.
 
 ## Success Criteria *(mandatory)*
 
@@ -271,6 +335,11 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   `SESSION_EXPIRED`.
 - **SC-007**: Every tool in contracts/graphdb.md is exercised by a NoETL playbook
   contract test that passes on the local runtime.
+- **SC-008**: Restoring an instance from its object-store backup into an empty volume
+  reproduces identical query results at the backed-up version, within [NEEDS
+  CLARIFICATION: RTO]. Backup lag stays under [NEEDS CLARIFICATION: RPO].
+- **SC-009**: Two instances (different domains) run side by side on one cluster. Writing
+  to, restoring or undeploying one leaves the other's versions and results unchanged.
 
 ## Assumptions
 
@@ -280,8 +349,12 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - The NoETL runtime (server and workers, or the CLI local runtime) is available to
   consumers. ehgraph does not depend on NoETL internals at runtime, beyond keychain
   credentials and the catalog.
-- MVP is single-node per namespace. Replication and multi-region are out of scope.
+- The MVP is a **single primary per instance**, with one instance per topology domain.
+  Read replicas and warm standby are the next stage. Sharding, multi-writer and
+  multi-region are deferred (research R4, Q18).
 - Out of MVP: a general query language, multi-request write transactions, and graph
   algorithms beyond traversal and shortest path.
-- Scale target for the MVP is set by the first consumer (qnetmon: a small/medium network).
-  [NEEDS CLARIFICATION: node/edge counts and write rate.]
+- Topology graphs per domain are assumed to fit in one node's memory: up to about 10^6
+  nodes and edges. Examples: a NoETL cluster's services, workers, pods and dependencies,
+  or a small/medium network.
+  [NEEDS CLARIFICATION: node/edge counts and write rate per domain.]

@@ -1,11 +1,24 @@
 # ehgraph — Event Horizon Graph
 
-A property-graph database for the NoETL ecosystem. It provides:
+A **topology database** for the NoETL ecosystem. ehgraph is a standalone database server,
+not a library, that stores topology graphs. Examples:
+
+- NoETL services and cluster topology
+- network topology
+- other topologies
+
+Each server instance provides:
 
 - a durable change log
 - versioned snapshots
 - session-scoped shared-memory graphs
 - access through MCP tools and HTTP, so NoETL playbooks and agents can use it
+- backup and restore through an object store
+
+Run one instance per purpose or topology domain, for example `ehgraph-noetl-cluster`
+and `ehgraph-network`. Each instance is a single primary, and is registered as its own
+NoETL `kind: Mcp` resource. Read replicas are the planned next stage, and sharding is
+deferred (research R4).
 
 Status: **specification only** (spec-kit). See:
 
@@ -13,6 +26,6 @@ Status: **specification only** (spec-kit). See:
 - MVP spec: [specs/001-ehgraph-mvp/](specs/001-ehgraph-mvp/spec.md)
 - Wiki: <https://github.com/noetl/ehgraph/wiki>
 
-First consumer: qnetmon (network topology graph).
+Expected first consumers: a NoETL cluster topology, and qnetmon (network topology).
 
 ehgraph reuses EHDB storage crates as libraries. It never stores graph data in EHDB.

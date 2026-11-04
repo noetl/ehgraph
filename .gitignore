@@ -52,6 +52,9 @@ bld/
 # Uncomment if you have tasks that rely on *.refresh files to move binaries
 # (https://github.com/github/gitignore/pull/3736)
 #!**/[Bb]in/*.refresh
+# Rust crate entry points live in src/bin. They are source, not build output.
+!**/src/[Bb]in/
+!**/src/[Bb]in/**
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/

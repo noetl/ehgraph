@@ -426,3 +426,14 @@ FodyWeavers.xsd
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
+
+# Rust
+target/
+.local/
+**/*.rs.bk
+*.rlib
+*.prof*
+*.profraw
+*.profdata
+.env
+.env.*

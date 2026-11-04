@@ -1,0 +1,20 @@
+{
+  "namespace": "lab",
+  "source": "fixture",
+  "execution_id": "fixture-1",
+  "ts_ms": 1700000000000,
+  "nodes": [
+    {"id": "site:s1", "type": "Site", "props": {"name": "Lab"}, "origin": "discovered"},
+    {"id": "device:sw1", "type": "Device", "props": {"site": "s1", "role": "switch"}, "origin": "discovered"},
+    {"id": "device:sw2", "type": "Device", "props": {"site": "s1", "role": "switch"}, "origin": "discovered"},
+    {"id": "iface:sw1-eth0", "type": "Interface", "props": {"device": "sw1", "mtu": 1500}, "origin": "discovered"},
+    {"id": "iface:sw2-eth0", "type": "Interface", "props": {"device": "sw2", "mtu": 1500}, "origin": "discovered"}
+  ],
+  "edges": [
+    {"id": "e1", "src": "device:sw1", "type": "HAS_INTERFACE", "dst": "iface:sw1-eth0"},
+    {"id": "e2", "src": "device:sw2", "type": "HAS_INTERFACE", "dst": "iface:sw2-eth0"},
+    {"id": "e3", "src": "device:sw1", "type": "CONNECTED_TO", "dst": "device:sw2"},
+    {"id": "e4", "src": "site:s1", "type": "HAS_DEVICE", "dst": "device:sw1"},
+    {"id": "e5", "src": "site:s1", "type": "HAS_DEVICE", "dst": "device:sw2"}
+  ]
+}

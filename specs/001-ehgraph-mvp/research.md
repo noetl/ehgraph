@@ -232,6 +232,57 @@ Two caveats:
 The **final choice stays open**: Q18 below. The recommendation is Stage 0 for the MVP,
 with Stage 1 planned.
 
+## R3 implementation note (2026-11-04) — local substrate, EHDB not linked
+
+Q15 is still open: EHDB maintainers have not confirmed that L0 may be linked by a store outside EHDB, and the election/fencing crates are scaffolds. This implementation does **not** depend on `ehdb-l0` or `ehdb-storage`.
+
+What was built instead, so the boundary stays recognizable:
+
+- Frames are `magic (EHGR) || version || u32 length || crc32 || JSON body`.
+- Parts are immutable once sealed. Seal triggers are size (8 MiB), count (1024 records), or age (30s, enabled). EHDB leaves age seal off; ehgraph turns it on.
+- A versioned manifest lists sealed parts and snapshots. The head pointer is a separate file, published after the frame is fsynced.
+- Snapshots are Arrow IPC files. Backup copies sealed parts with put-if-absent semantics and writes the head last, under `backup_prefix` (a directory).
+- Nothing is written to an EHDB instance or dataset. State lives under the instance `data_dir`.
+
+A later decision to pin `ehdb-l0` can replace the frame and substrate code. The `graph_version` cursor and the sealed-part layout are the seam a replica would tail. See Roadmap stage 1.
+
+## Provisional decisions (implementation, 2026-11-04)
+
+These are defaults chosen so the MVP could be built. They are not constitution amendments. The open-question table below stays until a human closes each item.
+
+| # | Provisional default |
+|---|---|
+| Q1 | Schemaless unless `data_dir/schemas/<namespace>.json` exists. `strict: true` rejects unknown types and missing required properties. |
+| Q2 | Snapshots on demand via `graph.snapshot.create`. Optional automatic cadence is off (`snapshot_every` is not implemented). Retention keeps the newest 16 snapshots. Log segments are not compacted. |
+| Q3 | Fixed tools only. No openCypher or GQL. |
+| Q4 | No `kind: graph`. MCP and HTTP only. |
+| Q5 | Bearer tokens in the instance config, grants per namespace for read and write. `namespace = "*"` is an operator grant. `auth.mode = "disabled"` for laptops. No call into NoETL `check_playbook_access`. |
+| Q6 | Local process (`scripts/ehgraph-local.sh`) and a Kubernetes StatefulSet with `replicas: 1`. |
+| Q7 | The session owner is the string the caller passes. ehgraph does not watch gateway session end. |
+| Q8 | `full`, `filter` (active nodes matching type/props, plus induced active edges), `khop`, and `snapshot` are all implemented. |
+| Q9 | Idle 300s, max lifetime 24h, grace 2s. After expiry the id returns `SESSION_EXPIRED`. No automatic reopen. Reads renew the idle lease only. |
+| Q10 | Pinned version plus explicit `graph.session.refresh`. No live deltas. |
+| Q11 | Global budget 256 MiB, per-session cap 64 MiB. Evict closed or expired sessions, then `MEMORY_BUDGET_EXCEEDED`. No reduced-scope fallback. |
+| Q12 | No cross-session sharing. Single-flight is per `(owner, namespace, scope, requested version)`. |
+| Q13 | No what-if edits. A write that carries `graph_session_id` returns `READ_ONLY_SESSION`. |
+| Q15 | Do not link EHDB. Local substrate as in the R3 note above. Revisit when maintainers publish stable reuse terms. |
+| Q16 | Rust, edition 2021, toolchain 1.99.1. Licence Apache-2.0, matching EHDB, provisional until confirmed. The request to implement in Rust is treated as confirming the language. |
+| Q17 | Smoke thresholds only: generated 10k-node / 20k-edge load under 5s. Not a production SLO. The planning assumption remains about 10^6 elements per domain on one node. |
+| Q18 | Adopt the R4 recommendation for the code: Stage 0 single primary. No replica process. `role=replica\|standby` refuses to start. |
+| Q19 | `backup_prefix` is a filesystem directory (put-if-absent, head last). It can be a mounted bucket later. RPO is the reported lag. No numeric RTO. Default seal age 30s. |
+| Q20 | `ehgraph-network` / domain `network`, and `ehgraph-noetl-cluster` / domain `noetl-cluster`. |
+
+Also, so the code could be tested:
+
+- Edge endpoints that are missing or inactive are `INVALID_ARGUMENT`. No placeholder nodes.
+- Nested maps and lists are allowed in properties. Timestamps use `{"$timestamp": ...}`.
+- Idempotency keys live as long as the namespace log. The hash covers namespace, elements, and `source`, not `execution_id` or `ts_ms`. A different payload for the same key is `CONFLICT`.
+- Historical reads start from the newest full snapshot at or below the version, then apply the log tail.
+- MCP is a hand-rolled JSON-RPC subset. Metrics are Prometheus text without the client crate, so the label set stays exact.
+- Deactivate-by-selector is stored as one op per id, so replay does not re-evaluate the clock.
+- Directed shortest path follows active outgoing edges.
+- Health and metrics are unauthenticated. Tools require a grant unless auth is disabled.
+
 ## Open questions (collected)
 
 | # | Question | Ref |

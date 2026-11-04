@@ -20,12 +20,20 @@ and `ehgraph-network`. Each instance is a single primary, and is registered as i
 NoETL `kind: Mcp` resource. Read replicas are the planned next stage, and sharding is
 deferred (research R4).
 
-Status: **specification only** (spec-kit). See:
+Status: **MVP server** on top of the spec in `specs/001-ehgraph-mvp/`. One `ehgraph` binary serves one primary instance. Read replicas are not implemented.
+
+```bash
+cargo build -p ehgraph-server
+scripts/ehgraph-local.sh start network          # 127.0.0.1:8081
+scripts/ehgraph-local.sh start noetl-cluster    # 127.0.0.1:8082
+curl -s http://127.0.0.1:8081/healthz
+```
 
 - Constitution: [.specify/memory/constitution.md](.specify/memory/constitution.md)
 - MVP spec: [specs/001-ehgraph-mvp/](specs/001-ehgraph-mvp/spec.md)
+- User and developer docs: [docs/wiki/Home.md](docs/wiki/Home.md) (GitHub wiki page names, kept in-repo)
 - Wiki: <https://github.com/noetl/ehgraph/wiki>
 
-Expected first consumers: a NoETL cluster topology, and qnetmon (network topology).
+Expected first consumers: a NoETL cluster topology (`ehgraph-noetl-cluster`), and qnetmon (`ehgraph-network`).
 
-ehgraph reuses EHDB storage crates as libraries. It never stores graph data in EHDB.
+EHDB is a design reference for the change-log frame, sealed parts, and age seal. This repository does not depend on it, and it never stores graph data in an EHDB dataset. See `specs/001-ehgraph-mvp/research.md` (R3 implementation note, Q15).

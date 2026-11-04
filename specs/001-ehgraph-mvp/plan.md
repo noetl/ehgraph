@@ -31,7 +31,7 @@ EHDB.
 
 ## Technical Context
 
-**Language/Version**: Rust (stable, edition 2021) [NEEDS CLARIFICATION: confirm; MSRV]
+**Language/Version**: Rust edition 2021, toolchain 1.99.1 (provisional; see research.md "Provisional decisions", Q16). The implementation request confirmed Rust. The MSRV recorded in `rust-toolchain.toml` is 1.99.1 because current crates.io releases need it.
 
 **Primary Dependencies**:
 

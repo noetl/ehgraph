@@ -1,0 +1,28 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_ops_backup
+  path: automation/agents/ehgraph/ops/backup
+  description: |
+    Not a kind: Mcp lifecycle verb. Call with workload.instance set to the
+    catalog resource name, or pass workload.mcp_resource the same way lifecycle does.
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  instance: ""
+  mcp_resource:
+    metadata: {}
+    spec: {}
+workflow:
+  - step: backup
+    desc: Ask the running primary to seal and ship. Head is written last.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          BASE='{{ workload.mcp_resource.spec.url | default("") }}'
+          BASE="${BASE%/mcp}"
+          curl -fsS -X POST -H "Authorization: Bearer ${EHGRAPH_TOKEN}" "$BASE/v1/admin/backup"

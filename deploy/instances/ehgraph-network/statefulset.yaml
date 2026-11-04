@@ -1,0 +1,84 @@
+# Render with scripts/render-deploy.sh <domain>.
+# One StatefulSet per topology domain. replicas is 1: a second process on the
+# same volume is refused by the data-directory lock.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ehgraph-network
+  namespace: ehgraph
+  labels:
+    app: ehgraph
+    ehgraph.io/domain: network
+    ehgraph.io/instance: ehgraph-network
+spec:
+  serviceName: ehgraph-network
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ehgraph
+      ehgraph.io/instance: ehgraph-network
+  template:
+    metadata:
+      labels:
+        app: ehgraph
+        ehgraph.io/domain: network
+        ehgraph.io/instance: ehgraph-network
+    spec:
+      containers:
+        - name: ehgraph
+          image: ghcr.io/noetl/ehgraph:latest
+          args: ["serve", "--config", "/etc/ehgraph/config.toml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: EHGRAPH_INSTANCE_ID
+              value: ehgraph-network
+            - name: EHGRAPH_DOMAIN
+              value: network
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ehgraph
+            - name: config
+              mountPath: /etc/ehgraph
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 100m
+      volumes:
+        - name: config
+          configMap:
+            name: ehgraph-network
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ehgraph-network
+  namespace: ehgraph
+  labels:
+    app: ehgraph
+    ehgraph.io/instance: ehgraph-network
+spec:
+  selector:
+    app: ehgraph
+    ehgraph.io/instance: ehgraph-network
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

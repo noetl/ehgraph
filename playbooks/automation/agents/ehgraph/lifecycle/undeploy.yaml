@@ -1,0 +1,27 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_lifecycle_undeploy
+  path: automation/agents/ehgraph/lifecycle/undeploy
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  mcp_resource:
+    path: ""
+    metadata: {}
+    spec:
+      deployment: {}
+  verb: undeploy
+workflow:
+  - step: undeploy
+    desc: Delete the instance StatefulSet and Service. The volume is retained unless the operator deletes the PVC.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          NAME='{{ workload.mcp_resource.metadata.name }}'
+          NAMESPACE='{{ workload.mcp_resource.spec.deployment.namespace | default("ehgraph") }}'
+          kubectl delete statefulset,service "$NAME" -n "$NAMESPACE" --ignore-not-found

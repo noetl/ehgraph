@@ -1,0 +1,25 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_lifecycle_status
+  path: automation/agents/ehgraph/lifecycle/status
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  mcp_resource:
+    path: ""
+    metadata: {}
+    spec: {}
+  verb: status
+workflow:
+  - step: status
+    desc: Read /healthz. The body carries instance_id, domain, role, and state.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          URL='{{ workload.mcp_resource.spec.discovery.initialize_url | default(workload.mcp_resource.spec.url) }}'
+          curl -fsS "$URL"

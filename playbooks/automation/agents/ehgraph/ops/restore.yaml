@@ -1,0 +1,34 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_ops_restore
+  path: automation/agents/ehgraph/ops/restore
+  description: |
+    Offline restore. Scale the StatefulSet to 0, empty the volume, run
+    `ehgraph restore --config ...`, then scale back to 1. Restore refuses a non-empty data dir.
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  instance: ""
+  mcp_resource:
+    metadata: {}
+    spec:
+      deployment: {}
+workflow:
+  - step: restore
+    desc: Restore the object-store prefix into an empty volume, then start the primary.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          NAME='{{ workload.mcp_resource.metadata.name | default(workload.instance) }}'
+          NAMESPACE='{{ workload.mcp_resource.spec.deployment.namespace | default("ehgraph") }}'
+          echo "scale ${NAME} to 0, ehgraph restore --config /etc/ehgraph/config.toml, scale back to 1"
+          kubectl scale statefulset "$NAME" -n "$NAMESPACE" --replicas=0
+          kubectl wait --for=delete pod -l "ehgraph.io/instance=${NAME}" -n "$NAMESPACE" --timeout=180s || true
+          # The restore command runs inside a one-shot pod with the same volume and backup prefix.
+          echo "ehgraph restore --config /etc/ehgraph/config.toml"
+          kubectl scale statefulset "$NAME" -n "$NAMESPACE" --replicas=1

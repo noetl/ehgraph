@@ -22,8 +22,9 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   - Q7: session owner.
   - Q11: budgets.
   - Q17: scale/SLO targets per domain for SC-003/SC-004.
-- [ ] T002 Update the constitution and plan with the answers. Remove the resolved
-  `[NEEDS CLARIFICATION]` markers.
+- [X] T002 Update the constitution and plan with the answers. Remove the resolved
+  `[NEEDS CLARIFICATION]` markers. Done 2026-11-06 as provisional answers: every marker
+  now points at the research.md Clarification register (C01–C27).
 
 ## Phase 1: Setup
 
@@ -136,7 +137,7 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
 - [X] T036 Record the measured trigger for Stage 1 (RTO, or read/session load beyond one
   node) and the reasons sharding stays deferred (R4).
 
-## Phase 6c: Embedded mode (2026-11-06; PROPOSED with constitution 3.0.0)
+## Phase 6c: Embedded mode (2026-11-06; constitution 3.0.0)
 
 - [X] T043 Factor the engine into the embeddable `crates/ehgraph` crate: `GraphConfig`,
   token → grant resolution, the MCP/HTTP router, metrics, and the `EhGraph` handle
@@ -158,7 +159,8 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   expiry by the sweep, host crash after ack, and torn tail from a host crash.
 - [ ] T050 noetl-server integration: pin `ehgraph` by tag, config sub-table, mount routes,
   and lifecycle wiring. This is a different repository and needs owner decisions E1–E4.
-- [ ] T051 Owner ratification of constitution 3.0.0 and of E1–E9 (research.md).
+- [X] T051 Constitution 3.0.0 adopted on the user's authorization to merge (2026-11-06).
+  E1–E9 and the register's "revisit" rows stay open to the owner and do not block.
 
 ## Phase 7: Polish
 

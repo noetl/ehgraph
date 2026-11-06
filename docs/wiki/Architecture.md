@@ -7,7 +7,7 @@ ehgraph is one topology engine, the `ehgraph` crate, that runs in two modes (see
 
 Both modes use the same log, tools, grants and guarantees. The crates behind `ehgraph` (`-core`, `-store`, `-memory`, `-api`, `-backup`) are internal.
 
-> Embedded mode is proposed with constitution 3.0.0 and is not ratified yet.
+> Embedded mode arrived with constitution 3.0.0 (2026-11-06). Its provisional defaults are in research.md E1–E9.
 
 ## Identity
 

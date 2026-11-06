@@ -32,7 +32,7 @@ metadata:
   name: ehgraph-network
   path: mcp/ehgraph/network
 spec:
-  url: http://ehgraph-network.ehgraph.svc.cluster.local:8080/mcp   # [NEEDS CLARIFICATION FR-009 targets]
+  url: http://ehgraph-network.ehgraph.svc.cluster.local:8080/mcp   # [PROVISIONAL C06, research.md register FR-009 targets]
   protocol: mcp/1.0
   lifecycle:
     deploy:    automation/agents/ehgraph/lifecycle/deploy
@@ -58,7 +58,7 @@ Instance parameters:
 - They render the instance-specific StatefulSet (`replicas: 1`, RWO volume), Service,
   config (`instance_id`, `domain`, `data_dir`, `backup_prefix`, budgets) and backup
   credentials.
-- [NEEDS CLARIFICATION: does the `kind: Mcp` lifecycle dispatch pass the resource (or its
+- [PROVISIONAL C25, research.md register: does the `kind: Mcp` lifecycle dispatch pass the resource (or its
   path) to the playbook? If not, each instance gets thin wrapper playbooks under
   `automation/agents/ehgraph/<domain>/lifecycle/*` that call the shared ones with
   `instance`.]
@@ -71,7 +71,7 @@ Other rules:
 - **No cross-instance routing.** A consumer picks the domain by calling the matching
   resource. A call that names a namespace the instance does not hold returns `NOT_FOUND`.
 
-Credentials come from the NoETL keychain. [NEEDS CLARIFICATION FR-008: token shape.]
+Credentials come from the NoETL keychain. [PROVISIONAL C05, research.md register FR-008: token shape.]
 
 ## Result envelope
 
@@ -102,7 +102,7 @@ Every tool returns
 
 `scope` is `{ kind: full }` \| `{ kind: filter, type?, props }` \|
 `{ kind: khop, seeds[], k, edge_types? }` \| `{ kind: snapshot, snapshot_id }`.
-[NEEDS CLARIFICATION FR-011]
+[PROVISIONAL C08, research.md register FR-011]
 
 ## Read tools (FR-005)
 
@@ -118,7 +118,7 @@ is absent, they read the durable store at head, or at `version?`.
 | `graph.path` | `src`, `dst`, `edge_types?`, `max_hops` |
 | `graph.snapshot.info` | `version?` → counts, bytes, `created_at` |
 
-[NEEDS CLARIFICATION FR-005: openCypher/GQL subset beyond these operations.]
+[PROVISIONAL C03, research.md register FR-005: openCypher/GQL subset beyond these operations.]
 
 ## Write tools (FR-007)
 
@@ -154,7 +154,7 @@ start in `restoring` state). It is not an online tool.
   - `ehgraph_backup_lag_seconds{namespace}`
 - Lifecycle events (FR-020): `session.opened`, `session.loaded`, `session.refreshed`,
   `session.closed`, `session.expired`, `session.evicted`, `session.load_failed`.
-  [NEEDS CLARIFICATION: sink — logs/metrics only, or also a NoETL event/callback?]
+  [PROVISIONAL C26, research.md register: sink — logs/metrics only, or also a NoETL event/callback?]
 
 ## Guarantees
 
@@ -166,8 +166,7 @@ start in `restoring` state). It is not an online tool.
   monotonic per namespace. Replays are no-ops.
 - A session reads exactly one `snapshot_version` until a refresh. A refresh never yields
   a read that mixes versions.
-- There is one resident copy per session. Identical copies may be shared [NEEDS
-  CLARIFICATION FR-017].
+- There is one resident copy per session. Identical copies may be shared [PROVISIONAL C12, research.md register FR-017].
 - When the budget is exceeded, only closed or expired sessions are evicted. An active
   session is never evicted silently.
 - **Backup**: the object-store copy is always a consistent prefix of the change log.

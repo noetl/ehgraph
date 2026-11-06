@@ -1,7 +1,8 @@
 # Embedding ehgraph
 
-> **Status: proposed.** Embedded mode comes with constitution 3.0.0, which is not ratified
-> yet. Open owner decisions are E1–E9 in `specs/001-ehgraph-mvp/research.md`.
+> Embedded mode comes with constitution 3.0.0 (adopted 2026-11-06). Its defaults are
+> provisional: E1–E9 and the Clarification register (C01–C27) in
+> `specs/001-ehgraph-mvp/research.md` list what the owner may still revisit.
 
 The same engine runs in two modes:
 

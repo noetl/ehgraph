@@ -2,8 +2,8 @@
 
 A **topology database** for the NoETL ecosystem. It stores topology graphs and runs in two
 modes from one engine: **standalone** (the `ehgraph` server) or **embedded** in-process in a
-host such as noetl-server (the `ehgraph` crate). Embedded mode is proposed and not yet
-ratified; see [docs/wiki/Embedding.md](docs/wiki/Embedding.md). Examples:
+host such as noetl-server (the `ehgraph` crate). See
+[docs/wiki/Embedding.md](docs/wiki/Embedding.md). Examples:
 
 - NoETL services and cluster topology
 - network topology

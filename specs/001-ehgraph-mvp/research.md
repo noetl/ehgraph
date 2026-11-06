@@ -75,7 +75,7 @@ Gaps that ehgraph must fill:
 4. No session-end hook, so ehgraph needs its own close plus idle timeout.
 5. The IPC cache is internal to the worker. It is not a playbook tool.
 6. No documented way for `noetl run --runtime local` to start or stop a session-lived
-   local service. [NEEDS CLARIFICATION]
+   local service. [PROVISIONAL C06, research.md register]
 
 **Design consequence**: a graph-memory component holds each session's snapshot in memory
 and serves reads over MCP/HTTP. The snapshot is held as Arrow record batches plus a CSR
@@ -145,7 +145,7 @@ Constraints:
   change" in EHDB's model. ehgraph should use the substrate, part, frame and manifest
   layer directly, or define its own `Dataset` impl in its own crate. Either way it should
   confirm with EHDB maintainers that L0 may serve a store outside EHDB, and which APIs are
-  stable. [NEEDS CLARIFICATION]
+  stable. [PROVISIONAL C15, research.md register]
 
 ## R4. Instance model — single instance vs replicated vs distributed
 
@@ -283,13 +283,58 @@ Also, so the code could be tested:
 - Directed shortest path follows active outgoing edges.
 - Health and metrics are unauthenticated. Tools require a grant unless auth is disabled.
 
-## Embedded mode (2026-11-06) — provisional answers, PENDING OWNER RATIFICATION
+## Clarification register (2026-11-06) — every open marker, answered provisionally
+
+The user authorized, on 2026-11-06, finishing the build and merging **without** waiting for
+ratification. So every `[NEEDS CLARIFICATION]` marker in the spec, plan, data model, contract
+and constitution now has a provisional answer here, and the marker in the source points at its
+row (`[PROVISIONAL Cnn …]`). Each answer is what the code implements today.
+
+**Revisit** means the owner should look again before the item matters in production. It does
+not block anything.
+- **yes**: likely to change, or it carries a production risk.
+- **low**: a sensible default that is easy to change.
+
+| ID | Question (ref) | Provisional answer, as implemented | Revisit |
+|---|---|---|---|
+| C01 | Schema per namespace or schemaless (Q1, FR-001) | Schemaless unless `data_dir/schemas/<ns>.json` exists. `strict: true` rejects unknown types and missing required properties. | low |
+| C02 | Snapshot cadence and retention (Q2, FR-003) | On demand (`graph.snapshot.create`). Keep the newest 16. Log segments are never compacted. | **yes**: the log grows without bound |
+| C03 | Fixed operations vs openCypher/GQL (Q3, FR-005) | Fixed tools only. | low |
+| C04 | First-class `kind: graph` (Q4, FR-006) | No. MCP + HTTP, plus the in-process `EhGraph` API in embedded mode. | low |
+| C05 | Token type; NoETL auth integration (Q5, FR-008) | Static bearer tokens with read/write grants per namespace in the instance config, identical in both modes. `*` is an operator grant. No `check_playbook_access`. | **yes**: keychain / NoETL auth (E3) |
+| C06 | Deploy targets; local runtime (Q6, FR-009, R2 gap 6) | Standalone StatefulSet `replicas: 1`; local process via `scripts/ehgraph-local.sh` (start/stop outside `noetl run`); **embedded** in a host via the `ehgraph` crate. | **yes**: which domains embed (E4) |
+| C07 | Session owner (Q7, FR-010) | The string the caller passes. No gateway-session hook. | **yes** (E7) |
+| C08 | Scope granularity (Q8, FR-011) | `full`, `filter`, `khop`, `snapshot`. | low |
+| C09 | Idle/lifetime; behaviour after expiry; release grace (Q9, FR-014, SC-006) | Idle 300 s, lifetime 24 h, grace 2 s; the sweep runs every 1 s, so memory is released within grace + 1 s. After that, reads with the id return `SESSION_EXPIRED`. No auto-reopen. | low |
+| C10 | Freshness model (Q10, FR-015) | Pinned version + explicit `graph.session.refresh`. No deltas. Staleness is the caller's choice. | low |
+| C11 | Budgets and overflow (Q11, FR-016) | 256 MiB global, 64 MiB per session. Evict ended sessions first, then `MEMORY_BUDGET_EXCEEDED`. No reduced-scope fallback. | **yes**: size inside the host when embedded (E5) |
+| C12 | Shared copies across sessions (Q12, FR-017) | No sharing. Single-flight per `(owner, namespace, scope, version)`. | low |
+| C13 | What-if edits (Q13, FR-019) | None. A write naming a session returns `READ_ONLY_SESSION`. | low |
+| C14 | Service vs embedded (Q14) | **Both**, from one engine (E1; constitution 3.0.0). | low (the user's own request) |
+| C15 | EHDB L0 reuse terms (Q15, R3) | Not linked. ehgraph's own substrate in the EHDB L0 shape. A future pin must equal the host's EHDB pins (E8). | **yes** |
+| C16 | Language, licence (Q16, constitution) | Rust (toolchain 1.99.1, edition 2021), Arrow in memory. Apache-2.0. | low (confirm the licence) |
+| C17 | Scale / SLO (Q17, SC-003, SC-004, SC-005, Assumptions) | Smoke thresholds only: a 10k-node / 20k-edge load in under 5 s. The planning size is ~10^6 elements per domain on one node. No p95 targets, no per-element byte cap. | **yes**: before any SLO |
+| C18 | Instance model (Q18, R4, FR-025) | Stage 0 single primary. `role=replica\|standby` refuses to start. In embedded mode the primary is the host process, and only one host process may embed an instance (E2). | **yes** if the host runs more than one replica |
+| C19 | RPO/RTO; object store (Q19, FR-024, SC-008) | `backup_prefix` is a filesystem directory (put-if-absent, head last). RPO = the reported lag metric. No numeric RTO. 30 s seal age. No cloud object-store client. | **yes**: a prod object store |
+| C20 | Initial domains and names (Q20, FR-022/023) | `ehgraph-network` / `network`, `ehgraph-noetl-cluster` / `noetl-cluster`. | low |
+| C21 | Missing edge endpoints (data model) | `INVALID_ARGUMENT`. No placeholder nodes. | low |
+| C22 | Nested maps in properties (data model) | Allowed. Timestamps are `{"$timestamp": …}`. | low |
+| C23 | Idempotency-key window (data model) | The life of the namespace log. The hash covers namespace, elements and `source`. | **yes**: memory grows with keys |
+| C24 | MCP layer: hand-rolled or a crate (plan) | A hand-rolled JSON-RPC subset (`2024-11-05`: initialize, ping, tools/list, tools/call). | low |
+| C25 | Does `kind: Mcp` lifecycle dispatch pass the resource? (contract) | Yes, as assumed by the shared playbooks: the dispatcher fills `workload.mcp_resource`, and the playbook derives `domain` from the last path segment. Not executed against a NoETL runtime (T016). | **yes**: verify on a real dispatcher |
+| C26 | Session lifecycle event sink (contract, FR-020) | `tracing` logs + the in-process registry event list + metrics. No NoETL callback. | medium |
+| C27 | Rollback safety of on-disk format (new, E9) | Frames refuse unknown versions. Manifest/head JSON ignore unknown fields. No format marker yet. | **yes**: before the first format change |
+
+Embedded-specific detail for C04–C07, C11, C15, C18, C19 and C27 is in E1–E9 below.
+
+## Embedded mode (2026-11-06) — provisional answers, adopted; owner may revisit
 
 The user asked (relayed 2026-11-06) for ehgraph to be usable across projects in **both**
 modes: embedded in-process in noetl-server, and standalone. That reverses Q14 and
-constitution 2.0.0 Principle I, so the change ships with a **proposed** 3.0.0 amendment.
-Nothing below is ratified. Each item is the default the code now implements, so the
-embedded path could be built and tested.
+constitution 2.0.0 Principle I, so the change ships with constitution 3.0.0. That was
+adopted on the user's authorization to merge, 2026-11-06. Each item is the default the code
+now implements. The "Owner's call" column lists what the owner may still want to revisit.
+None of it blocks.
 
 **Seam.** `crates/ehgraph` is the one supported API. `EhGraph` owns the store, the
 session registry, grant resolution, the router, and maintenance. `ehgraph-server` adds only
@@ -326,6 +371,8 @@ Other changes embedding forced (not spec questions):
 
 ## Open questions (collected)
 
+Every row has a provisional answer in the Clarification register above (C01–C27).
+
 | # | Question | Ref |
 |---|---|---|
 | Q1 | Schema per namespace or schemaless | FR-001 |
@@ -341,7 +388,7 @@ Other changes embedding forced (not spec questions):
 | Q11 | Budget sizes and overflow response | FR-016 |
 | Q12 | Shared copies across sessions | FR-017 |
 | Q13 | Session-local what-if edits | FR-019 |
-| Q14 | Service vs embedded library. Was **RESOLVED: service** (constitution 2.0.0, 2026-11-03). **REOPENED 2026-11-06**: the user asked for both modes. Provisional: both, from one engine (E1). Needs ratification of constitution 3.0.0 | R2, E1 |
+| Q14 | Service vs embedded library. Was **RESOLVED: service** (constitution 2.0.0, 2026-11-03). **REOPENED and re-resolved 2026-11-06**: both modes, from one engine (E1, constitution 3.0.0) | R2, E1, C14 |
 | Q15 | EHDB L0 reuse terms and stable API | R3 |
 | Q16 | Language (Rust), licence | constitution |
 | Q17 | Scale and SLO targets per domain | SC-003, SC-004, Assumptions |

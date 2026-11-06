@@ -1,8 +1,9 @@
 <!--
-Sync Impact Report — 3.0.0 (PROPOSED, 2026-11-06, PR feat/embedded-mode)
-- ⚠ STATUS: PROPOSED. Not ratified. It reverses the 2.0.0 decision recorded below
-  ("service vs embedded … resolved by the user, 2026-11-03"). It takes effect only when the
-  owner ratifies it by merging the PR. Until then 2.0.0 governs.
+Sync Impact Report — 3.0.0 (2026-11-06, PR noetl/ehgraph#2)
+- STATUS: ADOPTED on 2026-11-06, on the user's explicit authorization to finish and merge
+  without waiting for ratification. It reverses the 2.0.0 decision recorded below
+  ("service vs embedded … resolved by the user, 2026-11-03"). The provisional answers it
+  relies on (research.md E1–E9, C01–C27) stay open to the owner's revisit.
 - Version change: 2.0.0 → 3.0.0
   - MAJOR because Principle I is redefined again: ehgraph is ONE engine with TWO supported
     deployment modes — embedded in-process in a host (noetl-server) and the standalone
@@ -19,7 +20,8 @@ Sync Impact Report — 3.0.0 (PROPOSED, 2026-11-06, PR feat/embedded-mode)
 - Instance Model: single primary per instance is unchanged, and now also binds the host —
   only one host process may embed a given instance.
 - Templates reviewed: plan-template.md ✅, spec-template.md ✅, tasks-template.md ✅
-- Follow-ups: specs/001-ehgraph-mvp/research.md "Embedded mode (2026-11-06)", E1–E9.
+- Follow-ups: specs/001-ehgraph-mvp/research.md "Clarification register" (C01–C27) and
+  "Embedded mode (2026-11-06)" (E1–E9).
 
 Sync Impact Report — 2.0.0
 - Version change: 1.0.0 → 2.0.0
@@ -187,7 +189,7 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 - **Deferred:** sharding and multi-writer, for two reasons:
   - Traversals across partitions destroy locality.
   - Topology graphs for one domain fit in a single node's memory.
-- The final choice stays open (research R4, NEEDS CLARIFICATION). Any move beyond a single
+- The final choice stays open (research R4; provisional C18). Any move beyond a single
   primary requires an amendment and MUST preserve Principles II and III: one ordered log
   per namespace, and no split-brain.
 
@@ -196,7 +198,7 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 These are deliberate deviations from ai-meta and NoETL platform rules. They are accepted
 by the user (2026-11-03) and recorded here and in each plan's Complexity Tracking.
 
-**Scope (3.0.0, proposed):** both exceptions apply to **standalone mode only**. Embedded in
+**Scope (3.0.0):** both exceptions apply to **standalone mode only**. Embedded in
 noetl-server, ehgraph deploys nothing alongside NoETL and runs no persistent MCP server of
 its own, so it needs neither. Exception 1's third argument ("embedding it … would couple
 topology storage to NoETL's own release and scaling") remains true of embedded mode. That
@@ -231,19 +233,19 @@ is the trade the owner accepts by choosing it per instance.
 
 - Language: **Rust** (proposed), matching EHDB, the NoETL worker, the CLI and
   `noetl-arrow-cache`. In-memory format: Apache Arrow record batches plus adjacency
-  indexes. [NEEDS CLARIFICATION: confirm.]
+  indexes. [PROVISIONAL C16, research.md register: confirm.]
 - Deployment, standalone: container image. Kubernetes `StatefulSet` with `replicas: 1`
   per instance, plus a persistent volume. A local process is also supported for laptops.
 - Deployment, embedded: the `ehgraph` crate pinned by the host (git tag), with the data
   directory on a volume the host's single embedding process owns.
 - Same-node attach to session graphs in shm (the `noetl-arrow-cache` `IpcHint` format) is
   optional. Remote readers always use the network API.
-- Licence: [NEEDS CLARIFICATION: Apache-2.0 to match EHDB?]
+- Licence: [PROVISIONAL C16, research.md register: Apache-2.0 to match EHDB?]
 
 ## Development Workflow
 
 - Spec-kit drives the work: specify, then clarify, then plan, then tasks, then
-  implement. Open questions stay `[NEEDS CLARIFICATION]` until answered.
+  implement. Open questions stay `[PROVISIONAL C18, research.md register]` until answered.
 - Each plan MUST pass the Constitution Check, with deviations listed in Complexity
   Tracking.
 - Each change updates the ehgraph wiki and the ai-meta central record.
@@ -259,4 +261,4 @@ is the trade the owner accepts by choosing it per instance.
 - Reviews check Principles II–IV, VI and the Instance Model first, because their
   violations fail silently.
 
-**Version**: 3.0.0 (PROPOSED — pending owner ratification) | **Ratified**: 2026-11-03 (2.0.0) | **Last Amended**: 2026-11-06 (proposed)
+**Version**: 3.0.0 | **Ratified**: 2026-11-03 (2.0.0); 3.0.0 adopted 2026-11-06 on user authorization, provisional items revisitable | **Last Amended**: 2026-11-06

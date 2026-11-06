@@ -41,13 +41,13 @@ EHDB.
 - `tokio`
 - an HTTP framework (`axum` proposed)
 - `serde`/`serde_json`
-- an MCP JSON-RPC layer: [NEEDS CLARIFICATION: hand-rolled or a crate]
+- an MCP JSON-RPC layer: [PROVISIONAL C24, research.md register: hand-rolled or a crate]
 - `prometheus` metrics
 
 **Storage**: each instance has its own change log and snapshots on a `DurableSubstrate`
 (`LocalFsSubstrate` on an RWO volume), with an age-bounded seal. Sealed parts, snapshots
 and the manifest are shipped to an object store under `<backup_prefix>/<instance_id>/`.
-There is no external DB. [NEEDS CLARIFICATION Q19: the object store client. EHDB has only
+There is no external DB. [PROVISIONAL C19, research.md register Q19: the object store client. EHDB has only
 `LocalObjectStore`, and its GCS substrate is undecided.]
 
 **Testing**:
@@ -58,13 +58,13 @@ There is no external DB. [NEEDS CLARIFICATION Q19: the object store client. EHDB
 - `criterion` benchmarks for load latency and footprint.
 
 **Target Platform**: Linux container on Kubernetes (local kind first). Also a local
-process for laptops. [NEEDS CLARIFICATION FR-009]
+process for laptops. [PROVISIONAL C06, research.md register FR-009]
 
 **Project Type**: a database server. It is built as a Rust workspace whose internal
 crates produce one `ehgraph` server binary and container image. The crates are not a
 supported embedding API.
 
-**Performance Goals**: SC-003/SC-004. [NEEDS CLARIFICATION: targets]
+**Performance Goals**: SC-003/SC-004. [PROVISIONAL C17, research.md register: targets]
 
 **Constraints**:
 
@@ -75,7 +75,7 @@ supported embedding API.
 - no cross-node shm
 
 **Scale/Scope**: per domain, up to about 10^6 nodes and edges, sized to fit in one node's
-memory. Initial domains: `noetl-cluster` and `network` (qnetmon). [NEEDS CLARIFICATION
+memory. Initial domains: `noetl-cluster` and `network` (qnetmon). [PROVISIONAL C17/C20, research.md register
 Q17, Q20]
 
 ## Constitution Check

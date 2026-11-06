@@ -1,5 +1,4 @@
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -8,14 +7,16 @@ use ehgraph_memory::Limits;
 use ehgraph_store::StoreConfig;
 use serde::Deserialize;
 
+/// One instance's configuration, independent of how it is reached.
+///
+/// The same struct configures an embedded instance (inside a host such as
+/// noetl-server) and the standalone server, which adds only `listen`.
 #[derive(Debug, Clone, Deserialize)]
-pub struct Config {
+pub struct GraphConfig {
     pub instance_id: String,
     pub domain: String,
     pub data_dir: PathBuf,
     pub backup_prefix: PathBuf,
-    #[serde(default = "default_listen")]
-    pub listen: String,
     #[serde(default = "default_role")]
     pub role: String,
     #[serde(default)]
@@ -68,6 +69,11 @@ pub struct AuthConfig {
     /// `bearer` or `disabled` (local laptops and tests).
     #[serde(default = "default_auth_mode")]
     pub mode: String,
+    /// ⚠ Embedded only. An embedded instance's routes are mounted on the HOST's
+    /// listener, which is usually not loopback-only, so `mode = "disabled"` is refused
+    /// there unless this is set too. Ignored by the standalone server.
+    #[serde(default)]
+    pub allow_disabled_embedded: bool,
     #[serde(default)]
     pub grants: Vec<Grant>,
 }
@@ -117,16 +123,28 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             mode: default_auth_mode(),
+            allow_disabled_embedded: false,
             grants: Vec::new(),
         }
     }
 }
 
-impl Config {
+impl GraphConfig {
     pub fn load(path: &Path) -> Result<Self, EhError> {
         let text = fs::read_to_string(path)?;
-        let cfg: Config = toml::from_str(&text)
-            .map_err(|err| EhError::invalid(format!("config {}: {err}", path.display())))?;
+        Self::from_toml(&text).map_err(|err| {
+            EhError::new(
+                err.code,
+                format!("config {}: {}", path.display(), err.message),
+            )
+        })
+    }
+
+    /// Parse and validate a TOML document. A host that keeps ehgraph's settings in
+    /// its own config file can hand over the sub-table's text.
+    pub fn from_toml(text: &str) -> Result<Self, EhError> {
+        let cfg: GraphConfig = toml::from_str(text)
+            .map_err(|err| EhError::invalid(format!("ehgraph config: {err}")))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -142,14 +160,7 @@ impl Config {
         if self.auth.mode != "bearer" && self.auth.mode != "disabled" {
             return Err(EhError::invalid("auth.mode must be bearer or disabled"));
         }
-        self.listen_addr()?;
         Ok(())
-    }
-
-    pub fn listen_addr(&self) -> Result<SocketAddr, EhError> {
-        self.listen
-            .parse()
-            .map_err(|err| EhError::invalid(format!("listen {}: {err}", self.listen)))
     }
 
     pub fn role(&self) -> Result<Role, EhError> {
@@ -211,9 +222,6 @@ fn safe_label(field: &str, value: &str) -> Result<(), EhError> {
     Ok(())
 }
 
-fn default_listen() -> String {
-    "0.0.0.0:8080".into()
-}
 fn default_role() -> String {
     "primary".into()
 }

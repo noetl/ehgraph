@@ -114,6 +114,7 @@ async fn every_contract_tool_roundtrips() {
     assert_eq!(health["domain"], "test");
     assert_eq!(health["role"], "primary");
     assert_eq!(health["state"], "serving");
+    assert_eq!(health["mode"], "standalone");
 
     let (status, listed) = request(app, "GET", "/mcp/tools", None, None).await;
     assert_eq!(status, StatusCode::OK);

@@ -1,7 +1,9 @@
 # ehgraph — Event Horizon Graph
 
-A **topology database** for the NoETL ecosystem. ehgraph is a standalone database server,
-not a library, that stores topology graphs. Examples:
+A **topology database** for the NoETL ecosystem. It stores topology graphs and runs in two
+modes from one engine: **standalone** (the `ehgraph` server) or **embedded** in-process in a
+host such as noetl-server (the `ehgraph` crate). Embedded mode is proposed and not yet
+ratified; see [docs/wiki/Embedding.md](docs/wiki/Embedding.md). Examples:
 
 - NoETL services and cluster topology
 - network topology

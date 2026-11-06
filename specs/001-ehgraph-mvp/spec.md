@@ -221,10 +221,15 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 
 **Topology database server and instances**
 
-- **FR-021**: **Standalone server**: ehgraph MUST ship as a database server: one binary
-  and container image, with its own durable volume.
-  - Consumers MUST reach it only over the MCP/HTTP API.
-  - Embedding it as a library in a consumer process is not a supported mode.
+- **FR-021**: **Two deployment modes, one engine** (amended 2026-11-06, PROPOSED with
+  constitution 3.0.0; it was "standalone only"):
+  - **Standalone:** one binary and container image, with its own durable volume.
+    Consumers reach it over the MCP/HTTP API.
+  - **Embedded:** the `ehgraph` crate opened in-process by a host (noetl-server). The host
+    calls tools directly, with no network hop, and MAY mount the same MCP/HTTP routes on
+    its own listener.
+  - Both modes MUST enforce FR-002/FR-007/FR-008/FR-025 and FR-010–FR-020 identically.
+    Tests MUST cover each guarantee in the embedded path, not only the standalone one.
 - **FR-022**: **Instance and domain identity**: each instance MUST be configured with:
   - a stable `instance_id`
   - one `domain` label (e.g. `noetl-cluster`, `network`)
@@ -249,6 +254,10 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - **FR-025**: **Single writer**: exactly one process accepts writes for an instance.
   - The MVP enforces this with one replica plus a data-directory lock, and a second
     process on the same data directory MUST refuse to start.
+  - In embedded mode the lock is held by the host process, and a second handle on the same
+    directory in the SAME process MUST also be refused. A host MUST NOT run two processes
+    embedding the same instance on separate volumes; the lock cannot detect that
+    (research E2).
   - Read replicas or a standby are a later stage (research R4). They MUST NOT be enabled
     until election plus store-side fencing are in place.
 

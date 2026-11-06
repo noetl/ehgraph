@@ -283,6 +283,47 @@ Also, so the code could be tested:
 - Directed shortest path follows active outgoing edges.
 - Health and metrics are unauthenticated. Tools require a grant unless auth is disabled.
 
+## Embedded mode (2026-11-06) — provisional answers, PENDING OWNER RATIFICATION
+
+The user asked (relayed 2026-11-06) for ehgraph to be usable across projects in **both**
+modes: embedded in-process in noetl-server, and standalone. That reverses Q14 and
+constitution 2.0.0 Principle I, so the change ships with a **proposed** 3.0.0 amendment.
+Nothing below is ratified. Each item is the default the code now implements, so the
+embedded path could be built and tested.
+
+**Seam.** `crates/ehgraph` is the one supported API. `EhGraph` owns the store, the
+session registry, grant resolution, the router, and maintenance. `ehgraph-server` adds only
+`listen`, the CLI, tracing and signals. noetl-server is Rust on axum 0.8 and tokio 1, the
+same stack (checked in `noetl/server` `Cargo.toml`, 2026-11-06), so it can both call
+in-process and `nest()` the router.
+
+| # | Forced by | Provisional answer (implemented) | Owner's call |
+|---|---|---|---|
+| E1 | Q14, constitution I, FR-021 | Both modes, one engine. The hosts' API is `EhGraph`. Inner crates stay internal. | **Ratify 3.0.0**, or reject and keep 2.0.0 (then `crates/ehgraph` is just the server's internal layer). |
+| E2 | Q18, FR-025, Instance Model | The single writer is the host process. A process-wide claim plus `flock` refuses a second handle in-process and a second process. ⚠ This cannot detect two host pods embedding one `instance_id` on two volumes. Rule: only one host process embeds a given instance. | Is noetl-server single-replica where it embeds? If not: embed on one designated pod only (needs a host-side switch), or keep that domain standalone. No in-library election in the MVP. |
+| E3 | Q5, FR-008 | In-process calls present a bearer token and get the same per-namespace grants as HTTP. There is deliberately no public "trusted caller" bypass. The host uses its own grant (e.g. an operator `*` grant) for internal calls. | May the host assert a principal for an end user (a trusted path), and should grants come from the NoETL keychain / `check_playbook_access` instead of the TOML? |
+| E4 | Q6, FR-009, FR-022/023 | An embedded instance is addressed at the host's mounted route `<host>/ehgraph/<domain>/mcp`. Its `kind: Mcp` resource points there. Deploy/undeploy are the host's own. `/healthz` and `ehgraph_info{mode}` say which mode is serving. | Which domains embed, and which stay standalone? Proposed: `noetl-cluster` embedded in noetl-server; `network` (qnetmon) standalone. |
+| E5 | Q11, FR-016, constitution IV | The budget defaults are unchanged (256 MiB global, 64 MiB per session). In embedded mode they come out of the host's memory limit. | Budget numbers for the noetl-server pod. |
+| E6 | Q19, FR-024 | Scheduled backup runs on the host's runtime via `start_maintenance` (`backup_interval_s`). `ehgraph backup` (the CLI) cannot run while the host holds the lock; use `EhGraph::backup_now` or `POST …/v1/admin/backup` (operator grant). | RPO for an embedded domain. Whether the host's own backup schedule should drive it. |
+| E7 | Q7, FR-010/014 | Unchanged: the owner is the string the caller passes. An embedding host *could* close sessions on gateway logout in-process, but nothing wires that. | Should noetl-server bind session owners to gateway sessions and close them on logout? |
+| E8 | Q15 | Unchanged: no EHDB link. ⚠ New constraint: if ehgraph ever links `ehdb-l0`/`ehdb-core`, its pin MUST equal noetl-server's (`noetl/server` already says its EHDB pins "move together"), or one binary carries two `ehdb-l0`s. | Part of Q15. |
+| E9 | new (lifecycle) | An embedded instance upgrades and **rolls back with its host**. Change-log frames carry a version byte, and an unknown one refuses the open (`UNAVAILABLE`), which is correct. ⚠ Manifest/head JSON do NOT deny unknown fields, so an older host would silently ignore a newer field. This is the ehdb#439 class of failure; it is not triggered by today's format. | Before the first on-disk format change: a format marker that refuses unknown versions (the EHDB `FORMAT_VERSION` pattern). |
+
+Other changes embedding forced (not spec questions):
+- The library installs no runtime, tracing or signal handler. Maintenance requires the
+  caller's tokio runtime and errors outside one.
+- `shutdown` refuses new calls, drains in-flight ones (with a timeout), and releases the
+  lock, so a host can hand the directory over without exiting. Drop without shutdown is
+  safe: tasks hold only a `Weak` and are aborted.
+- Engine calls do fsync, so routes and `call_async` use the blocking pool. Before this,
+  the MVP's handlers ran them on async workers, which is harmless in a dedicated server and
+  a host-wide stall when embedded.
+- `auth.mode = "disabled"` is refused when embedded unless
+  `auth.allow_disabled_embedded = true`, because the routes are on the host's listener.
+- Correction: the MVP comment "the same process can lock the file again" was wrong for
+  `flock` on macOS (measured: a second open in-process is refused). The in-process claim
+  makes the guarantee independent of that.
+
 ## Open questions (collected)
 
 | # | Question | Ref |
@@ -300,7 +341,7 @@ Also, so the code could be tested:
 | Q11 | Budget sizes and overflow response | FR-016 |
 | Q12 | Shared copies across sessions | FR-017 |
 | Q13 | Session-local what-if edits | FR-019 |
-| ~~Q14~~ | ~~Service vs embedded library~~ — **RESOLVED: service** (standalone topology database server; accepted exception; constitution 2.0.0) | R2 |
+| Q14 | Service vs embedded library. Was **RESOLVED: service** (constitution 2.0.0, 2026-11-03). **REOPENED 2026-11-06**: the user asked for both modes. Provisional: both, from one engine (E1). Needs ratification of constitution 3.0.0 | R2, E1 |
 | Q15 | EHDB L0 reuse terms and stable API | R3 |
 | Q16 | Language (Rust), licence | constitution |
 | Q17 | Scale and SLO targets per domain | SC-003, SC-004, Assumptions |

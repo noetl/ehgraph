@@ -27,6 +27,10 @@ domain = "noetl-cluster"
 data_dir = "{root}/data"
 backup_prefix = "{root}/backup"
 
+# E2: the host declares it is the only writer. Without this the open refuses.
+[embedded]
+host_replicas = 1
+
 [[auth.grants]]
 token = "noetl-server-internal"
 principal = "noetl-server"

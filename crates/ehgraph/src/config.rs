@@ -32,6 +32,77 @@ pub struct GraphConfig {
     /// When non-zero, the running server ships sealed parts on this interval.
     #[serde(default)]
     pub backup_interval_s: u64,
+    /// Embedded only: how the host guarantees it is this instance's only writer.
+    /// Ignored by the standalone server.
+    #[serde(default)]
+    pub embedded: EmbeddedConfig,
+}
+
+/// The host's single-writer declaration for an embedded instance (clarification E2).
+///
+/// An embedded instance is a **single writer**. The data-directory lock proves that
+/// only within one machine's view of one volume: two host pods, each with its own
+/// volume, would each take their own lock and become two primaries for one domain,
+/// and nothing on disk could notice. So embedded mode does not rely on the lock
+/// across pods. It refuses to start unless the host *declares* a topology in which
+/// a second writer cannot exist:
+///
+/// - `host_replicas` must be present and equal to `1`. An absent value refuses: an
+///   embedded writer never starts on an assumption.
+/// - `host_ordinal`, when the host has one (a StatefulSet pod index), must be `0`.
+///   Only ordinal 0 may write, so a scaled-up StatefulSet's extra pods refuse even
+///   if `host_replicas` was left at 1.
+/// - `leader`, when the host runs an election, must be `true`.
+///
+/// A domain whose host cannot meet this runs **standalone** (`ehgraph-server`, one
+/// StatefulSet replica per instance) and is reached over MCP/HTTP.
+///
+/// ⚠ This is a declaration, not a proof. A host that runs two replicas and
+/// declares one defeats it; the host's own deployment checks (noetl-server's
+/// replica-count and machine-id guards) are the other half.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedConfig {
+    #[serde(default)]
+    pub host_replicas: Option<u32>,
+    #[serde(default)]
+    pub host_ordinal: Option<u32>,
+    #[serde(default)]
+    pub leader: Option<bool>,
+}
+
+impl EmbeddedConfig {
+    /// Refuse unless this host is provably the only writer for `domain`.
+    pub fn check_single_writer(&self, domain: &str) -> Result<(), EhError> {
+        let refuse = |why: String| {
+            Err(EhError::invalid(format!(
+                "embedded ehgraph for domain {domain} refuses to start: {why}. An embedded \
+                 instance is a single writer and this host cannot guarantee it; run domain \
+                 {domain} standalone (ehgraph-server) instead (E2)"
+            )))
+        };
+        match self.host_replicas {
+            None => {
+                return refuse(
+                    "embedded.host_replicas is not declared (it must be set to 1 by the host)"
+                        .into(),
+                )
+            }
+            Some(1) => {}
+            Some(n) => return refuse(format!("the host runs {n} replicas")),
+        }
+        if let Some(ordinal) = self.host_ordinal {
+            if ordinal != 0 {
+                return refuse(format!(
+                    "this host is ordinal {ordinal}; only ordinal 0 may be the writer"
+                ));
+            }
+        }
+        if self.leader == Some(false) {
+            return refuse("this host is not the elected leader".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,6 +260,7 @@ impl GraphConfig {
             seal_max_records: self.store.seal_max_records,
             seal_max_age: Duration::from_secs(self.store.seal_max_age_s),
             snapshot_keep: self.store.snapshot_keep,
+            claim_identity: false,
         }
     }
 

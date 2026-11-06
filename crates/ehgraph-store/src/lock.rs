@@ -104,3 +104,56 @@ impl Drop for DirLock {
         release_claim(&self.claimed);
     }
 }
+
+/// `instance_id`s and domains with an open primary in this process.
+fn identities() -> &'static Mutex<HashSet<String>> {
+    static IDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    IDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Process-wide claim on an instance's identity (clarification E2).
+///
+/// [`DirLock`] stops two handles on one *directory*. This stops two primaries for
+/// one *instance or domain* in one process even when they point at different
+/// directories, e.g. a host that opens `noetl-cluster` twice from two config
+/// sections. Two primaries for one domain are two histories for one graph, so the
+/// second open fails fast instead of silently forking it.
+///
+/// ⚠ In-process only, like every lock here. Two *processes* (two host pods on two
+/// volumes) are refused by configuration, not by this claim: see
+/// `ehgraph::EmbeddedConfig`.
+pub struct IdentityClaim {
+    keys: [String; 2],
+}
+
+impl IdentityClaim {
+    pub fn acquire(instance_id: &str, domain: &str) -> Result<Self, EhError> {
+        let keys = [
+            format!("instance:{instance_id}"),
+            format!("domain:{domain}"),
+        ];
+        let mut held = identities().lock().unwrap_or_else(|p| p.into_inner());
+        for key in &keys {
+            if held.contains(key) {
+                let (kind, name) = key.split_once(':').expect("prefixed");
+                return Err(EhError::conflict(format!(
+                    "a primary for {kind} {name} is already open in this process; an ehgraph \
+                     instance is a single writer, and one domain has exactly one primary"
+                )));
+            }
+        }
+        for key in &keys {
+            held.insert(key.clone());
+        }
+        Ok(Self { keys })
+    }
+}
+
+impl Drop for IdentityClaim {
+    fn drop(&mut self) {
+        let mut held = identities().lock().unwrap_or_else(|p| p.into_inner());
+        for key in &self.keys {
+            held.remove(key);
+        }
+    }
+}

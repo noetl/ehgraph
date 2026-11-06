@@ -1,0 +1,27 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_lifecycle_restart
+  path: automation/agents/ehgraph/lifecycle/restart
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  mcp_resource:
+    path: ""
+    metadata: {}
+    spec:
+      deployment: {}
+  verb: restart
+workflow:
+  - step: restart
+    desc: Delete the pod. The StatefulSet recreates it and the data-dir lock moves with the process.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          NAME='{{ workload.mcp_resource.metadata.name }}'
+          NAMESPACE='{{ workload.mcp_resource.spec.deployment.namespace | default("ehgraph") }}'
+          kubectl delete pod "${NAME}-0" -n "$NAMESPACE" --wait=true

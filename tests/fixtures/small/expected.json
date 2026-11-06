@@ -1,0 +1,9 @@
+{
+  "namespace": "lab",
+  "graph_version": 1,
+  "nodes": 5,
+  "edges": 5,
+  "neighbors_sw1_out": ["e1", "e3"],
+  "path_site_to_iface": ["site:s1", "device:sw1", "iface:sw1-eth0"],
+  "devices_with_mtu_at_least_1500": ["iface:sw1-eth0", "iface:sw2-eth0"]
+}

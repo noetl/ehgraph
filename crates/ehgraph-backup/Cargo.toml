@@ -1,0 +1,20 @@
+[package]
+name = "ehgraph-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Ship and restore one ehgraph instance through a filesystem object-store prefix"
+
+[dependencies]
+ehgraph-core = { workspace = true }
+ehgraph-store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+ehgraph-core = { workspace = true }
+ehgraph-store = { workspace = true }
+tempfile = { workspace = true }

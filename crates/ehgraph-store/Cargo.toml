@@ -1,0 +1,26 @@
+[package]
+name = "ehgraph-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Durable change log, snapshots, and single-writer data directory for one ehgraph instance"
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+crc32fast = { workspace = true }
+ehgraph-core = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[bin]]
+name = "ehgraph-hold"
+path = "src/bin/hold.rs"

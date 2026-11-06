@@ -1,0 +1,28 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_lifecycle_redeploy
+  path: automation/agents/ehgraph/lifecycle/redeploy
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  mcp_resource:
+    path: ""
+    metadata: {}
+    spec:
+      deployment: {}
+  verb: redeploy
+workflow:
+  - step: redeploy
+    desc: Roll the single pod onto the current image. The data volume stays attached.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          NAME='{{ workload.mcp_resource.metadata.name }}'
+          NAMESPACE='{{ workload.mcp_resource.spec.deployment.namespace | default("ehgraph") }}'
+          kubectl rollout restart statefulset "$NAME" -n "$NAMESPACE"
+          kubectl rollout status statefulset "$NAME" -n "$NAMESPACE"

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ehgraph-core",
+    "crates/ehgraph-store",
+    "crates/ehgraph-backup",
+    "crates/ehgraph-memory",
+    "crates/ehgraph-api",
+    "crates/ehgraph-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.83"
+publish = false
+repository = "https://github.com/noetl/ehgraph"
+
+[workspace.dependencies]
+ehgraph-core = { path = "crates/ehgraph-core" }
+ehgraph-store = { path = "crates/ehgraph-store" }
+ehgraph-backup = { path = "crates/ehgraph-backup" }
+ehgraph-memory = { path = "crates/ehgraph-memory" }
+ehgraph-api = { path = "crates/ehgraph-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+crc32fast = "1"
+sha2 = "0.10"
+libc = "0.2"
+arrow-array = "53"
+arrow-schema = "53"
+arrow-ipc = "53"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-util", "net"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tempfile = "3"
+http-body-util = "0.1"

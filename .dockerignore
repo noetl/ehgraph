@@ -1,0 +1,12 @@
+target
+.git
+.github
+**/*.rs.bk
+*.log
+.env
+.env.*
+.local
+docs
+specs
+.specify
+.cursor

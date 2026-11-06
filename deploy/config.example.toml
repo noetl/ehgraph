@@ -1,0 +1,41 @@
+# One file per instance. The instance_id convention is ehgraph-<domain>.
+instance_id = "ehgraph-network"
+domain = "network"
+data_dir = "/var/lib/ehgraph"
+backup_prefix = "/var/backups/ehgraph/ehgraph-network"
+listen = "0.0.0.0:8080"
+role = "primary"
+backup_interval_s = 30
+
+[budgets]
+global_bytes = 268435456
+per_session_bytes = 67108864
+
+[session]
+idle_timeout_s = 300
+max_lifetime_s = 86400
+grace_s = 2
+
+[store]
+seal_max_bytes = 8388608
+seal_max_records = 1024
+# Age seal is on. This bounds the unshipped tail (the backup RPO window).
+seal_max_age_s = 30
+snapshot_keep = 16
+
+[auth]
+mode = "bearer"
+
+[[auth.grants]]
+token = "replace-me"
+principal = "qnetmon"
+namespace = "qnetmon"
+read = true
+write = true
+
+[[auth.grants]]
+token = "replace-me-ops"
+principal = "ops"
+namespace = "*"
+read = true
+write = true

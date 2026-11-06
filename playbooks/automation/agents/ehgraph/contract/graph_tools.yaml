@@ -1,0 +1,50 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_contract_graph_tools
+  path: automation/agents/ehgraph/contract/graph_tools
+  description: |
+    Contract walk of every tool in specs/001-ehgraph-mvp/contracts/graphdb.md
+    against a local ehgraph. The executable copy of this walk is
+    crates/ehgraph-server/tests/contract.rs. This playbook is the shape a
+    NoETL runtime would run once `kind: mcp` steps are pointed at ehgraph-network
+    or ehgraph-noetl-cluster. It is not executed in ehgraph CI.
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  resource: ehgraph-network
+  namespace: lab
+workflow:
+  - step: upsert
+    tool:
+      kind: mcp
+      resource: "{{ workload.resource }}"
+      tool: graph.upsert
+      with:
+        namespace: "{{ workload.namespace }}"
+        source: contract
+        execution_id: contract-1
+        nodes:
+          - id: device:sw1
+            type: Device
+        edges: []
+  - step: read
+    tool:
+      kind: mcp
+      resource: "{{ workload.resource }}"
+      tool: graph.node
+      with:
+        namespace: "{{ workload.namespace }}"
+        id: device:sw1
+  - step: session
+    tool:
+      kind: mcp
+      resource: "{{ workload.resource }}"
+      tool: graph.session.open
+      with:
+        namespace: "{{ workload.namespace }}"
+        owner: contract
+        scope:
+          kind: full

@@ -1,0 +1,29 @@
+# Register this catalog resource as-is. Lifecycle dispatch (noetl >= 2.26)
+# passes the resource as workload.mcp_resource, so one shared playbook
+# serves every instance. domain is the last path segment; instance_id is metadata.name.
+apiVersion: noetl.io/v2
+kind: Mcp
+metadata:
+  name: ehgraph-network
+  path: mcp/ehgraph/network
+spec:
+  url: http://ehgraph-network.ehgraph.svc.cluster.local:8080/mcp
+  protocol: mcp/1.0
+  lifecycle:
+    deploy: automation/agents/ehgraph/lifecycle/deploy
+    undeploy: automation/agents/ehgraph/lifecycle/undeploy
+    redeploy: automation/agents/ehgraph/lifecycle/redeploy
+    restart: automation/agents/ehgraph/lifecycle/restart
+    status: automation/agents/ehgraph/lifecycle/status
+    discover: automation/agents/ehgraph/lifecycle/discover
+  discovery:
+    initialize_url: http://ehgraph-network.ehgraph.svc.cluster.local:8080/healthz
+    tools_list_url: http://ehgraph-network.ehgraph.svc.cluster.local:8080/mcp/tools
+    refresh_via: automation/agents/ehgraph/lifecycle/discover
+  deployment:
+    namespace: ehgraph
+    release_name: ehgraph-network
+    domain: network
+    service_port: 8080
+    storage: 20Gi
+    backup_prefix: gs://noetl-ehgraph/ehgraph-network

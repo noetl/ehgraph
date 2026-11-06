@@ -1,0 +1,26 @@
+apiVersion: noetl.io/v2
+kind: Mcp
+metadata:
+  name: ehgraph-noetl-cluster
+  path: mcp/ehgraph/noetl-cluster
+spec:
+  url: http://ehgraph-noetl-cluster.ehgraph.svc.cluster.local:8080/mcp
+  protocol: mcp/1.0
+  lifecycle:
+    deploy: automation/agents/ehgraph/lifecycle/deploy
+    undeploy: automation/agents/ehgraph/lifecycle/undeploy
+    redeploy: automation/agents/ehgraph/lifecycle/redeploy
+    restart: automation/agents/ehgraph/lifecycle/restart
+    status: automation/agents/ehgraph/lifecycle/status
+    discover: automation/agents/ehgraph/lifecycle/discover
+  discovery:
+    initialize_url: http://ehgraph-noetl-cluster.ehgraph.svc.cluster.local:8080/healthz
+    tools_list_url: http://ehgraph-noetl-cluster.ehgraph.svc.cluster.local:8080/mcp/tools
+    refresh_via: automation/agents/ehgraph/lifecycle/discover
+  deployment:
+    namespace: ehgraph
+    release_name: ehgraph-noetl-cluster
+    domain: noetl-cluster
+    service_port: 8080
+    storage: 20Gi
+    backup_prefix: gs://noetl-ehgraph/ehgraph-noetl-cluster

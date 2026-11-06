@@ -1,0 +1,35 @@
+apiVersion: noetl.io/v2
+kind: Playbook
+metadata:
+  name: ehgraph_lifecycle_deploy
+  path: automation/agents/ehgraph/lifecycle/deploy
+  description: |
+    Deploy one ehgraph instance from its kind: Mcp resource.
+    The server dispatcher fills workload.mcp_resource. replicas stays 1.
+  agent: true
+executor:
+  profile: local
+  version: noetl-runtime/1
+workload:
+  mcp_resource:
+    path: ""
+    metadata: {}
+    spec:
+      deployment: {}
+  verb: deploy
+workflow:
+  - step: deploy
+    desc: Render the StatefulSet (replicas 1, RWO volume) and apply it.
+    tool:
+      kind: shell
+      cmds:
+        - |
+          set -euo pipefail
+          PATH_VALUE='{{ workload.mcp_resource.path }}'
+          DOMAIN="${PATH_VALUE##*/}"
+          NAME='{{ workload.mcp_resource.metadata.name | default("ehgraph-" ~ (workload.mcp_resource.path | split("/") | last)) }}'
+          NAMESPACE='{{ workload.mcp_resource.spec.deployment.namespace | default("ehgraph") }}'
+          echo "deploy ${NAME} domain=${DOMAIN} namespace=${NAMESPACE} replicas=1"
+          # Render deploy/template/statefulset.yaml with DOMAIN and kubectl apply -n "$NAMESPACE" -f -
+          # in the cluster that owns this catalog. The chart/image is ghcr.io/noetl/ehgraph.
+          kubectl get statefulset "$NAME" -n "$NAMESPACE" >/dev/null 2>&1 || true

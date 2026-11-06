@@ -440,6 +440,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ehgraph"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ehgraph-api",
+ "ehgraph-backup",
+ "ehgraph-core",
+ "ehgraph-memory",
+ "ehgraph-store",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "ehgraph-api"
 version = "0.1.0"
 dependencies = [
@@ -494,11 +514,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
- "ehgraph-api",
- "ehgraph-backup",
- "ehgraph-core",
- "ehgraph-memory",
- "ehgraph-store",
+ "ehgraph",
  "http-body-util",
  "serde",
  "serde_json",

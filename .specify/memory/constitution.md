@@ -1,5 +1,29 @@
 <!--
-Sync Impact Report
+Sync Impact Report — 3.0.0 (2026-11-06, PR noetl/ehgraph#2)
+- STATUS: ADOPTED on 2026-11-06, on the user's explicit authorization to finish and merge
+  without waiting for ratification. It reverses the 2.0.0 decision recorded below
+  ("service vs embedded … resolved by the user, 2026-11-03"). The provisional answers it
+  relies on (research.md E1–E9, C01–C27) stay open to the owner's revisit.
+- Version change: 2.0.0 → 3.0.0
+  - MAJOR because Principle I is redefined again: ehgraph is ONE engine with TWO supported
+    deployment modes — embedded in-process in a host (noetl-server) and the standalone
+    server. Request: the user, relayed 2026-11-06 ("usable across all projects … BOTH
+    deployment modes").
+- Modified principles:
+  - I. A Standalone Topology Database Server → I. One Topology Engine, Two Deployment Modes
+  - IV. Bounded Session Memory: session graphs live in the process that hosts the instance
+    (the ehgraph server, or the embedding host)
+  - V. NoETL-Native Access: an embedded instance is also reachable in-process; its
+    `kind: Mcp` resource points at the host's mounted routes
+- Accepted Exceptions: Exception 1 and 2 now apply to standalone mode only. Embedded mode in
+  noetl-server deploys nothing alongside NoETL, so it needs neither.
+- Instance Model: single primary per instance is unchanged, and now also binds the host —
+  only one host process may embed a given instance.
+- Templates reviewed: plan-template.md ✅, spec-template.md ✅, tasks-template.md ✅
+- Follow-ups: specs/001-ehgraph-mvp/research.md "Clarification register" (C01–C27) and
+  "Embedded mode (2026-11-06)" (E1–E9).
+
+Sync Impact Report — 2.0.0
 - Version change: 1.0.0 → 2.0.0
   - MAJOR because Principle I is redefined: ehgraph is a standalone topology database
     server, not a component that could be embedded. The deployment posture is resolved
@@ -36,8 +60,13 @@ It stores property graphs with:
 - session-scoped shared-memory graphs
 - access through MCP and HTTP, so NoETL playbooks and agents can use it as a tool
 
-It is operated like PostgreSQL: a database server you deploy and connect to. It is not an
-application microservice, and it is not a library linked into a consumer.
+It runs in one of two modes, from the same engine:
+
+- **Embedded**: in-process inside a host — first noetl-server — as a library, with no
+  separate process and no network hop for the host's own calls.
+- **Standalone**: operated like PostgreSQL, a database server you deploy and connect to.
+
+Either way it is not an application microservice.
 
 Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/docs`,
 `repos/cli`, `repos/worker`, `repos/ehdb`. The cited facts are in
@@ -45,13 +74,18 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 
 ## Core Principles
 
-### I. A Standalone Topology Database Server
+### I. One Topology Engine, Two Deployment Modes
 
-- **The product is the server.** The ehgraph product is the `ehgraph` database server
-  binary and its container image.
-  - Library crates are internal structure. They are not a supported way to embed
-    ehgraph inside another process.
-  - Consumers reach ehgraph only over its network API (Principle V).
+- **The product is the engine.** The `ehgraph` crate is the supported embedding API. The
+  `ehgraph` server binary and its container image wrap that same crate.
+  - **Embedded:** a host opens an instance in-process (`EhGraph::open_embedded`). It calls
+    tools directly, and it may mount the instance's MCP/HTTP routes on its own listener.
+  - **Standalone:** the server binary serves one instance on its own listener and volume.
+  - The two modes MUST share one engine. They differ only in transport and lifecycle:
+    the same log format, the same tools, the same grants, the same guarantees (II–IV).
+    A guarantee that holds in only one mode is a defect.
+  - The crates behind `ehgraph` (`-core`, `-store`, `-memory`, `-api`, `-backup`) stay
+    internal structure. Hosts depend on `ehgraph` only.
 - **Consumer-agnostic.** ehgraph MUST be usable by any consumer and any topology domain.
   Domain-specific node/edge types, identity rules and business logic live in the
   consumer's schema config and playbooks. They are never in ehgraph code.
@@ -82,8 +116,9 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 
 ### IV. Bounded Session Memory
 
-- Session graphs are held in memory by the ehgraph server process that serves the
-  session.
+- Session graphs are held in memory by the process that hosts the instance: the ehgraph
+  server, or the embedding host. In embedded mode the budget is part of the host's
+  memory, and the host MUST size it as such.
   - There is one shared copy per session.
   - It stays resident until explicit close or idle expiry, then it is released.
 - Residency MUST be bounded by an idle lease, a maximum lifetime, a per-session cap and a
@@ -100,6 +135,10 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 - **One instance, one catalog resource.**
   - Each ehgraph instance is registered as its own NoETL `kind: Mcp` catalog resource,
     with its own address and lifecycle playbooks (deploy, undeploy, status, discover).
+    For an embedded instance, the address is the host's mounted route
+    (`<host>/ehgraph/<domain>/mcp`), and deploy/undeploy are the host's.
+  - Embedded in-process calls are not an exception to authorization. They present a
+    bearer credential and are checked against the same per-namespace grants.
   - Consumers choose a topology domain by choosing the resource.
 - Callers authenticate with credentials from the NoETL keychain.
 - The surface stays narrow: fixed read/traversal operations plus batch writes. A query
@@ -137,7 +176,10 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 ## Instance Model
 
 - **MVP:** multiple independent instances, one per purpose or topology domain.
-  - Each instance is a **single primary**: one process, one writer.
+  - Each instance is a **single primary**: one process, one writer. In embedded mode that
+    process is the host. A host MUST NOT run more than one process embedding the same
+    instance (for example, a multi-replica noetl-server Deployment where every pod opens
+    it): the data-directory lock catches a shared volume, but not two pods on two volumes.
   - Each has its own durable change log and snapshots, and its own backup and restore
     through an object store.
   - Instances share nothing and know nothing about each other.
@@ -147,7 +189,7 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 - **Deferred:** sharding and multi-writer, for two reasons:
   - Traversals across partitions destroy locality.
   - Topology graphs for one domain fit in a single node's memory.
-- The final choice stays open (research R4, NEEDS CLARIFICATION). Any move beyond a single
+- The final choice stays open (research R4; provisional C18). Any move beyond a single
   primary requires an amendment and MUST preserve Principles II and III: one ordered log
   per namespace, and no split-brain.
 
@@ -155,6 +197,12 @@ Grounding: NoETL platform sources in `noetl/ai-meta` → `repos/noetl`, `repos/d
 
 These are deliberate deviations from ai-meta and NoETL platform rules. They are accepted
 by the user (2026-11-03) and recorded here and in each plan's Complexity Tracking.
+
+**Scope (3.0.0):** both exceptions apply to **standalone mode only**. Embedded in
+noetl-server, ehgraph deploys nothing alongside NoETL and runs no persistent MCP server of
+its own, so it needs neither. Exception 1's third argument ("embedding it … would couple
+topology storage to NoETL's own release and scaling") remains true of embedded mode. That
+is the trade the owner accepts by choosing it per instance.
 
 1. **ai-meta `agents/rules/self-sufficiency.md`.** The rule says "nothing to deploy
    alongside NoETL", and to "push back hard" on a new separately-running service.
@@ -185,17 +233,19 @@ by the user (2026-11-03) and recorded here and in each plan's Complexity Trackin
 
 - Language: **Rust** (proposed), matching EHDB, the NoETL worker, the CLI and
   `noetl-arrow-cache`. In-memory format: Apache Arrow record batches plus adjacency
-  indexes. [NEEDS CLARIFICATION: confirm.]
-- Deployment: container image. Kubernetes `StatefulSet` with `replicas: 1` per instance,
-  plus a persistent volume. A local process is also supported for laptops.
+  indexes. [PROVISIONAL C16, research.md register: confirm.]
+- Deployment, standalone: container image. Kubernetes `StatefulSet` with `replicas: 1`
+  per instance, plus a persistent volume. A local process is also supported for laptops.
+- Deployment, embedded: the `ehgraph` crate pinned by the host (git tag), with the data
+  directory on a volume the host's single embedding process owns.
 - Same-node attach to session graphs in shm (the `noetl-arrow-cache` `IpcHint` format) is
   optional. Remote readers always use the network API.
-- Licence: [NEEDS CLARIFICATION: Apache-2.0 to match EHDB?]
+- Licence: [PROVISIONAL C16, research.md register: Apache-2.0 to match EHDB?]
 
 ## Development Workflow
 
 - Spec-kit drives the work: specify, then clarify, then plan, then tasks, then
-  implement. Open questions stay `[NEEDS CLARIFICATION]` until answered.
+  implement. Open questions stay `[PROVISIONAL C18, research.md register]` until answered.
 - Each plan MUST pass the Constitution Check, with deviations listed in Complexity
   Tracking.
 - Each change updates the ehgraph wiki and the ai-meta central record.
@@ -211,4 +261,4 @@ by the user (2026-11-03) and recorded here and in each plan's Complexity Trackin
 - Reviews check Principles II–IV, VI and the Instance Model first, because their
   violations fail silently.
 
-**Version**: 2.0.0 | **Ratified**: 2026-11-03 | **Last Amended**: 2026-11-03
+**Version**: 3.0.0 | **Ratified**: 2026-11-03 (2.0.0); 3.0.0 adopted 2026-11-06 on user authorization, provisional items revisitable | **Last Amended**: 2026-11-06

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
-description = "ehgraph database server: one primary instance, MCP and HTTP"
+description = "ehgraph standalone server: the embeddable ehgraph engine behind its own listener"
 
 [[bin]]
 name = "ehgraph"
@@ -14,11 +14,7 @@ path = "src/main.rs"
 [dependencies]
 axum = { workspace = true }
 clap = { workspace = true }
-ehgraph-api = { workspace = true }
-ehgraph-backup = { workspace = true }
-ehgraph-core = { workspace = true }
-ehgraph-memory = { workspace = true }
-ehgraph-store = { workspace = true }
+ehgraph = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

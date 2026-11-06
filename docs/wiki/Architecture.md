@@ -1,6 +1,13 @@
 # Architecture
 
-ehgraph is one database server process per topology domain. Library crates inside the repo are how the binary is split for tests. They are not a supported way to embed ehgraph.
+ehgraph is one topology engine, the `ehgraph` crate, that runs in two modes (see [Embedding](Embedding)):
+
+- **Standalone:** the `ehgraph` server binary, one process per topology domain.
+- **Embedded:** in-process inside a host such as noetl-server.
+
+Both modes use the same log, tools, grants and guarantees. The crates behind `ehgraph` (`-core`, `-store`, `-memory`, `-api`, `-backup`) are internal.
+
+> Embedded mode arrived with constitution 3.0.0 (2026-11-06). Its provisional defaults are in research.md E1–E9.
 
 ## Identity
 
@@ -34,7 +41,7 @@ Copies are not shared across sessions. Two owners loading the same scope get two
 
 ## Single writer
 
-One process holds an exclusive lock on `data_dir/LOCK`. A second process using the same directory exits. Kubernetes deploys use a StatefulSet with `replicas: 1` and a ReadWriteOnce volume. The server refuses to start with `role` set to `replica` or `standby`.
+One process holds an exclusive lock on `data_dir/LOCK`: the server, or the embedding host. A second process using the same directory is refused. So is a second handle in the same process, through a process-wide claim on the canonical path. Kubernetes deploys use a StatefulSet with `replicas: 1` and a ReadWriteOnce volume. The server refuses to start with `role` set to `replica` or `standby`.
 
 ## Backup
 

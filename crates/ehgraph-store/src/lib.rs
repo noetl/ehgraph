@@ -11,6 +11,7 @@
 mod arrow_batch;
 mod frame;
 mod lock;
+pub use lock::DirLock;
 mod state;
 mod store;
 

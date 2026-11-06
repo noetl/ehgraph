@@ -34,7 +34,7 @@ ehgraph instance (instance_id, domain)        e.g. ehgraph-network
 | Element | Fields |
 |---|---|
 | Instance | `instance_id` (stable, e.g. `ehgraph-network`), `domain`, `role` (`primary`; later `replica` \| `standby`, research R4), `data_dir`, `backup_prefix` (object store), budgets (global session bytes, per-session cap), `started_at`, `build`. Configured at deploy time; reported by `/healthz`, `status` and every envelope |
-| Namespace | `name`, `schema_ref?` (FR-001, NEEDS CLARIFICATION), `head_version`, grants (read/write principals) |
+| Namespace | `name`, `schema_ref?` (FR-001, provisional C01), `head_version`, grants (read/write principals) |
 | Node | `id` (stable string chosen by the consumer), `type`, `props` (typed map), `first_seen`, `last_seen`, `active`, `origin?` (consumer-defined tag, e.g. `discovered` \| `designed`), `source`, `execution_id`, `version_created`, `version_updated` |
 | Edge | `id` (consumer-supplied, or default `hash(src, type, dst, origin)`), `src`, `dst`, `type`, `props`, plus the same history and provenance fields as Node |
 | ChangeRecord | `graph_version` (u64, monotonic per namespace), `op` (`upsert_node`, `upsert_edge`, `deactivate_node`, `deactivate_edge`), element payload, `idempotency_key?`, `execution_id`, `ts` |
@@ -46,10 +46,10 @@ Rules:
 
 - Ids are deterministic and supplied by the consumer, which makes upserts idempotent.
 - An edge upsert whose `src` or `dst` is unknown or inactive is rejected with
-  `INVALID_ARGUMENT`. [NEEDS CLARIFICATION: or create placeholder nodes?]
+  `INVALID_ARGUMENT`. [PROVISIONAL C21, research.md register: or create placeholder nodes?]
 - Props are typed: string, int, float, bool, timestamp, list of scalar, nested map.
-  [NEEDS CLARIFICATION: is a nested map allowed in the MVP?]
-- An idempotency key is remembered per namespace for [NEEDS CLARIFICATION: window].
+  [PROVISIONAL C22, research.md register: is a nested map allowed in the MVP?]
+- An idempotency key is remembered per namespace for [PROVISIONAL C23, research.md register: window].
 
 ## Durable layout (proposed; research.md R3)
 
@@ -67,7 +67,7 @@ mirrored to `backup_prefix` (`<bucket>/<instance_id>/...`) by the backup shipper
 - **Materialized state for durable reads**: rebuilt from the latest snapshot plus the log
   tail. It is never authoritative.
 - **Retention**: snapshots older than the policy are dropped from the manifest. Log
-  segments covered by a retained snapshot may be compacted. [NEEDS CLARIFICATION FR-003]
+  segments covered by a retained snapshot may be compacted. [PROVISIONAL C02, research.md register FR-003]
 
 ## In-memory layout (graph sessions)
 

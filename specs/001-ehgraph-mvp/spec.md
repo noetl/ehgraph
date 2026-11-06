@@ -184,7 +184,7 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - **FR-001**: **Property-graph model**: nodes and directed edges, each with a stable id,
   a type label, a typed property map, soft-history fields (`first_seen`, `last_seen`,
   `active`) and provenance (`source`, `execution_id`). Multiple namespaces exist per
-  deployment, isolated from each other. [NEEDS CLARIFICATION: is the schema declared per
+  deployment, isolated from each other. [PROVISIONAL C01, research.md register: is the schema declared per
   namespace (types and required properties, validated on write), or schemaless in the
   MVP?]
 - **FR-002**: **Durable storage**: every mutation MUST be appended to a durable, ordered
@@ -194,37 +194,41 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   MUST NOT be stored in EHDB.
 - **FR-003**: **Versioned snapshots**: immutable snapshots of a namespace (or a scope) at
   a `graph_version`, listed in a versioned manifest and readable by version, with a
-  retention policy. [NEEDS CLARIFICATION: snapshot cadence (every N changes,
+  retention policy. [PROVISIONAL C02, research.md register: snapshot cadence (every N changes,
   time-based, or on demand) and retention.]
 - **FR-004**: **Session-scoped shared-memory loading**: provided by FR-010–FR-020.
 - **FR-005**: **Query and traversal API** (read): get node or edge by id; filter by type,
   origin and properties; neighbors by edge type and direction; k-hop subgraph; shortest
   path; snapshot and version info. Every result carries its `graph_version`. Results are
-  bounded by limits or cursors. [NEEDS CLARIFICATION: fixed operations only for the MVP,
+  bounded by limits or cursors. [PROVISIONAL C03, research.md register: fixed operations only for the MVP,
   or also an openCypher/GQL subset?]
 - **FR-006**: **NoETL exposure**: the API MUST be exposed as MCP tools (`tools/list`,
   `tools/call`) callable with `kind: mcp`, and over HTTP. Agent tools bind to read-only
   sub-playbooks that call it. **Each instance** is registered as its own `kind: Mcp`
-  catalog resource with lifecycle playbooks (FR-023). [NEEDS CLARIFICATION: should it also become a first-class
+  catalog resource with lifecycle playbooks (FR-023). [PROVISIONAL C04, research.md register: should it also become a first-class
   NoETL tool kind (e.g. `kind: graph`) in noetl-tools?]
 - **FR-007**: **Writes**: batch upsert and deactivate of nodes and edges, idempotent by
   stable id and an optional client idempotency key, returning the new `graph_version`.
   Writes are never accepted on session handles (FR-019).
 - **FR-008**: **Auth and tenancy**: callers authenticate with a credential from the
   NoETL keychain. Access is granted per namespace, separately for read and write.
-  [NEEDS CLARIFICATION: token type, and whether to integrate with NoETL server auth
+  [PROVISIONAL C05, research.md register: token type, and whether to integrate with NoETL server auth
   (`check_playbook_access`).]
 - **FR-009**: **Operability**: health/status for the `kind: Mcp` `status` verb; metrics
-  for sessions, resident bytes, load latency, evictions and versions. [NEEDS
-  CLARIFICATION: deployment targets for the MVP — Kubernetes only, or also a local
+  for sessions, resident bytes, load latency, evictions and versions. [PROVISIONAL C06, research.md register: deployment targets for the MVP — Kubernetes only, or also a local
   process for laptop runs (`noetl run --runtime local`)?]
 
 **Topology database server and instances**
 
-- **FR-021**: **Standalone server**: ehgraph MUST ship as a database server: one binary
-  and container image, with its own durable volume.
-  - Consumers MUST reach it only over the MCP/HTTP API.
-  - Embedding it as a library in a consumer process is not a supported mode.
+- **FR-021**: **Two deployment modes, one engine** (amended 2026-11-06 with constitution
+  3.0.0; it was "standalone only"):
+  - **Standalone:** one binary and container image, with its own durable volume.
+    Consumers reach it over the MCP/HTTP API.
+  - **Embedded:** the `ehgraph` crate opened in-process by a host (noetl-server). The host
+    calls tools directly, with no network hop, and MAY mount the same MCP/HTTP routes on
+    its own listener.
+  - Both modes MUST enforce FR-002/FR-007/FR-008/FR-025 and FR-010–FR-020 identically.
+    Tests MUST cover each guarantee in the embedded path, not only the standalone one.
 - **FR-022**: **Instance and domain identity**: each instance MUST be configured with:
   - a stable `instance_id`
   - one `domain` label (e.g. `noetl-cluster`, `network`)
@@ -243,12 +247,16 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   snapshots and manifest to an object store under its own prefix.
   - It MUST be able to restore every namespace from that prefix into an empty volume, at
   the last backed-up `graph_version`.
-  - Backup lag (the RPO) MUST be exposed as a metric. [NEEDS CLARIFICATION: target RPO and
+  - Backup lag (the RPO) MUST be exposed as a metric. [PROVISIONAL C19, research.md register: target RPO and
   RTO per domain, and the object store (GCS, S3-compatible, or a mounted volume for local
   runs).]
 - **FR-025**: **Single writer**: exactly one process accepts writes for an instance.
   - The MVP enforces this with one replica plus a data-directory lock, and a second
     process on the same data directory MUST refuse to start.
+  - In embedded mode the lock is held by the host process, and a second handle on the same
+    directory in the SAME process MUST also be refused. A host MUST NOT run two processes
+    embedding the same instance on separate volumes; the lock cannot detect that
+    (research E2).
   - Read replicas or a standby are a later stage (research R4). They MUST NOT be enabled
     until election plus store-side fencing are in place.
 
@@ -256,7 +264,7 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 
 - **FR-010**: A **graph session** MUST be opened on a user session's first read (or
   explicitly), identified by a `graph_session_id`, and bound to an owner reference.
-  [NEEDS CLARIFICATION: what is the owner/"user session"? Options: a NoETL gateway
+  [PROVISIONAL C07, research.md register: what is the owner/"user session"? Options: a NoETL gateway
   session token, an MCP client connection, a `kind: agent` conversation, or an explicit
   session opened by a playbook. NoETL has gateway sessions with `expires_at` and logout,
   but no session-end hook that triggers a playbook (research.md R2). So ehgraph needs
@@ -264,7 +272,7 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - **FR-011**: On open, the requested scope MUST be loaded from durable storage into
   memory once, tagged with the `graph_version` it reflects. The scope is one of: the
   full namespace; a subgraph (by property, such as a site, or the k-hop neighbourhood of
-  seed nodes); or a named snapshot. [NEEDS CLARIFICATION: is the full namespace alone
+  seed nodes); or a named snapshot. [PROVISIONAL C08, research.md register: is the full namespace alone
   acceptable for the MVP?]
 - **FR-012**: All readers in a session MUST read the single in-memory copy. There are no
   per-reader copies.
@@ -272,19 +280,19 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   then be released (memory freed, registry entry closed).
 - **FR-014**: A session MUST end on (a) explicit close, (b) the owner session ending,
   where that is observable, or (c) idle timeout. Every read renews the idle lease.
-  [NEEDS CLARIFICATION: idle timeout and maximum lifetime values. What should a caller
+  [PROVISIONAL C09, research.md register: idle timeout and maximum lifetime values. What should a caller
   see after expiry: an error, or an automatic reopen?]
 - **FR-015**: Every in-memory graph MUST carry a version, and every read MUST report it.
   The default is a **pinned** version. An explicit `refresh` MUST reload (or apply
-  deltas up to) a newer version atomically. [NEEDS CLARIFICATION: is
+  deltas up to) a newer version atomically. [PROVISIONAL C10, research.md register: is
   pinned-with-explicit-refresh enough, or is periodic or near-live delta application
   required? What is the maximum acceptable staleness?]
 - **FR-016**: Memory limits: a global budget and a per-session cap MUST be configured.
   When a load would exceed them, ehgraph first evicts only ended or expired sessions,
   then responds explicitly (wait, reject with `MEMORY_BUDGET_EXCEEDED`, offer a reduced
   scope, or fall back to durable reads). It never evicts an active session silently.
-  [NEEDS CLARIFICATION: budget sizes and which overflow response.]
-- **FR-017**: Concurrent sessions MUST be isolated in lifecycle. [NEEDS CLARIFICATION:
+  [PROVISIONAL C11, research.md register: budget sizes and which overflow response.]
+- **FR-017**: Concurrent sessions MUST be isolated in lifecycle. [PROVISIONAL C12, research.md register:
   may sessions with the same `(namespace, scope, version)` share one reference-counted
   copy?]
 - **FR-018**: Access is through FR-006. Readers on other nodes use the network API, not
@@ -292,7 +300,7 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   durable store. Same-node attach to Arrow batches in POSIX shm (`IpcHint` format) is
   optional.
 - **FR-019**: The in-memory graph MUST be read-only. Writes go to the change log, and
-  sessions see them only after a refresh. [NEEDS CLARIFICATION: is session-local,
+  sessions see them only after a refresh. [PROVISIONAL C13, research.md register: is session-local,
   never-persisted "what-if" editing needed, such as simulating a failed link?]
 - **FR-020**: Session lifecycle events MUST be emitted with session id, owner, scope,
   version and bytes, so residency is auditable and the state can be rebuilt at the
@@ -322,22 +330,19 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   crash-between-append-and-acknowledgement test never leaves a partial batch.
 - **SC-002**: After deleting all derived state, a rebuild from the log plus snapshots
   reproduces identical query results at the same version.
-- **SC-003**: Session load latency: the first read completes within [NEEDS
-  CLARIFICATION: target, e.g. p95 < X s for N nodes / M edges]. Later reads (a k-hop
-  neighbour query) complete within [NEEDS CLARIFICATION: e.g. p95 < Y ms].
+- **SC-003**: Session load latency: the first read completes within [PROVISIONAL C17, research.md register: target, e.g. p95 < X s for N nodes / M edges]. Later reads (a k-hop
+  neighbour query) complete within [PROVISIONAL C17, research.md register: e.g. p95 < Y ms].
 - **SC-004**: Memory footprint: resident bytes per session for the reference graph are at
-  most [NEEDS CLARIFICATION: bytes per node/edge, or a cap]. The global resident total
+  most [PROVISIONAL C17, research.md register: bytes per node/edge, or a cap]. The global resident total
   never exceeds the budget in the load test.
 - **SC-005**: Durable storage is read exactly once per session load or refresh. 100% of
   reads in a session report the same version until a refresh.
-- **SC-006**: After close or idle expiry, memory is released within [NEEDS
-  CLARIFICATION: grace period], and 100% of later reads with that id return
+- **SC-006**: After close or idle expiry, memory is released within [PROVISIONAL C09, research.md register: grace period], and 100% of later reads with that id return
   `SESSION_EXPIRED`.
 - **SC-007**: Every tool in contracts/graphdb.md is exercised by a NoETL playbook
   contract test that passes on the local runtime.
 - **SC-008**: Restoring an instance from its object-store backup into an empty volume
-  reproduces identical query results at the backed-up version, within [NEEDS
-  CLARIFICATION: RTO]. Backup lag stays under [NEEDS CLARIFICATION: RPO].
+  reproduces identical query results at the backed-up version, within [PROVISIONAL C19, research.md register: RTO]. Backup lag stays under [PROVISIONAL C19, research.md register: RPO].
 - **SC-009**: Two instances (different domains) run side by side on one cluster. Writing
   to, restoring or undeploying one leaves the other's versions and results unchanged.
 
@@ -357,4 +362,4 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - Topology graphs per domain are assumed to fit in one node's memory: up to about 10^6
   nodes and edges. Examples: a NoETL cluster's services, workers, pods and dependencies,
   or a small/medium network.
-  [NEEDS CLARIFICATION: node/edge counts and write rate per domain.]
+  [PROVISIONAL C17, research.md register: node/edge counts and write rate per domain.]

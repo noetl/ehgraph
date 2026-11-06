@@ -22,8 +22,9 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   - Q7: session owner.
   - Q11: budgets.
   - Q17: scale/SLO targets per domain for SC-003/SC-004.
-- [ ] T002 Update the constitution and plan with the answers. Remove the resolved
-  `[NEEDS CLARIFICATION]` markers.
+- [X] T002 Update the constitution and plan with the answers. Remove the resolved
+  `[NEEDS CLARIFICATION]` markers. Done 2026-11-06 as provisional answers: every marker
+  now points at the research.md Clarification register (C01–C27).
 
 ## Phase 1: Setup
 
@@ -135,6 +136,31 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   exist.
 - [X] T036 Record the measured trigger for Stage 1 (RTO, or read/session load beyond one
   node) and the reasons sharding stays deferred (R4).
+
+## Phase 6c: Embedded mode (2026-11-06; constitution 3.0.0)
+
+- [X] T043 Factor the engine into the embeddable `crates/ehgraph` crate: `GraphConfig`,
+  token → grant resolution, the MCP/HTTP router, metrics, and the `EhGraph` handle
+  (`open_embedded`/`open_standalone`, `call`/`call_async`, `client`, `router`,
+  `start_maintenance`, `shutdown`, `backup_now`).
+- [X] T044 `ehgraph-server` becomes a thin wrapper (listen, CLI, tracing, signals). The
+  TOML shape is unchanged.
+- [X] T045 In-process single writer: a process-wide claim on the canonical `data_dir` on
+  top of `flock`. Released on drop and on `shutdown`.
+- [X] T046 Lifecycle: no runtime, tracing or signals installed by the library.
+  Maintenance runs on the host's runtime, is tied to the handle, and stops on shutdown or
+  drop. `shutdown` refuses new calls, drains, and releases the lock.
+- [X] T047 Engine calls from the routes and `call_async` run on the blocking pool.
+- [X] T048 Embedded refuses `auth.mode = "disabled"` unless
+  `auth.allow_disabled_embedded = true`.
+- [X] T049 Embedded tests (`crates/ehgraph/tests/embedded.rs`): grants in-process,
+  mounted routes plus in-process calls on one instance, same-process and cross-process
+  lock (both directions), shutdown/drop release, maintenance on the host runtime, idle
+  expiry by the sweep, host crash after ack, and torn tail from a host crash.
+- [ ] T050 noetl-server integration: pin `ehgraph` by tag, config sub-table, mount routes,
+  and lifecycle wiring. This is a different repository and needs owner decisions E1–E4.
+- [X] T051 Constitution 3.0.0 adopted on the user's authorization to merge (2026-11-06).
+  E1–E9 and the register's "revisit" rows stay open to the owner and do not block.
 
 ## Phase 7: Polish
 

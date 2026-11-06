@@ -1,6 +1,6 @@
 # ehgraph
 
-ehgraph (Event Horizon Graph) is a **topology database server**. It is not a library you link into another process. You run one instance per purpose, connect over MCP or HTTP, and keep the graph for a user session resident in that process until the session ends.
+ehgraph (Event Horizon Graph) is a **topology database**. You run one instance per purpose, either as the standalone server (connect over MCP or HTTP) or embedded in-process in a host such as noetl-server ([Embedding](Embedding)). The graph for a user session stays resident in that process until the session ends.
 
 Examples:
 

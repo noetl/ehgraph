@@ -1,10 +1,16 @@
 use ehgraph_api::Engine;
 use ehgraph_core::now_ms;
 
-pub fn render(engine: &Engine) -> String {
+/// Prometheus text for one instance. `mode` is added only as the separate
+/// `ehgraph_info` series, so every existing series keeps its exact label set.
+pub fn render(engine: &Engine, mode: &str) -> String {
     let instance = &engine.identity.instance_id;
     let domain = &engine.identity.domain;
     let mut out = String::new();
+    out.push_str("# TYPE ehgraph_info gauge\n");
+    out.push_str(&format!(
+        "ehgraph_info{{instance_id=\"{instance}\",domain=\"{domain}\",mode=\"{mode}\"}} 1\n"
+    ));
     let counts = engine.sessions.counts().unwrap_or_default();
     out.push_str("# TYPE ehgraph_sessions gauge\n");
     for state in [

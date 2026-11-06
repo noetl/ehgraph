@@ -13,6 +13,7 @@ use ehgraph_store::{BackupPlan, Store};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NamespaceCheckpoint {
     pub backed_up_version: u64,
     pub head_version_at_ship: u64,
@@ -20,7 +21,11 @@ pub struct NamespaceCheckpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Checkpoint {
+    /// On-disk format marker (E9). A restore by an older build refuses a newer one.
+    #[serde(default = "ehgraph_store::format::legacy_format")]
+    pub format: u32,
     pub instance_id: String,
     pub domain: String,
     pub shipped_at_ms: i64,
@@ -67,6 +72,7 @@ pub fn ship(
         );
     }
     let checkpoint = Checkpoint {
+        format: ehgraph_store::format::current_format(),
         instance_id: plan.instance_id,
         domain: plan.domain,
         shipped_at_ms,
@@ -92,17 +98,22 @@ pub fn read_checkpoint(backup_prefix: &Path) -> Result<Option<Checkpoint>, EhErr
     if !path.exists() {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+    Ok(Some(ehgraph_store::format::decode_marked(
+        &fs::read(&path)?,
+        &path,
+    )?))
 }
 
 /// Restore into an empty data directory. The caller then opens the store, which rebuilds.
 pub fn restore(backup_prefix: &Path, data_dir: &Path) -> Result<Checkpoint, EhError> {
-    if !backup_prefix.join("checkpoint.json").exists() {
+    // Read (and format-check, E9) the checkpoint BEFORE copying anything, so an older
+    // build refuses a newer backup without leaving a half-restored directory.
+    let Some(checkpoint) = read_checkpoint(backup_prefix)? else {
         return Err(EhError::not_found(format!(
             "no checkpoint in {}",
             backup_prefix.display()
         )));
-    }
+    };
     if data_dir.exists() {
         let mut entries = fs::read_dir(data_dir)?;
         if entries.next().is_some() {
@@ -114,7 +125,6 @@ pub fn restore(backup_prefix: &Path, data_dir: &Path) -> Result<Checkpoint, EhEr
     }
     fs::create_dir_all(data_dir)?;
     copy_tree(backup_prefix, data_dir, &["checkpoint.json"])?;
-    let checkpoint = read_checkpoint(backup_prefix)?.expect("checkpoint exists");
     tracing::info!(
         instance_id = %checkpoint.instance_id,
         domain = %checkpoint.domain,

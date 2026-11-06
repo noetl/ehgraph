@@ -18,15 +18,38 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+/// Per-root tag. Tests run in parallel in one process, and an embedded primary
+/// claims its `instance_id` and `domain` process-wide (E2), so every test's
+/// instance needs its own identity. Derived from the root so the re-exec'd child
+/// opens the same identity as its parent.
+fn tag(root: &Path) -> String {
+    root.file_name()
+        .unwrap()
+        .to_string_lossy()
+        .trim_start_matches('.')
+        .to_string()
+}
+
+fn instance_id(root: &Path) -> String {
+    format!("ehgraph-embedded-{}", tag(root))
+}
+
+fn domain(root: &Path) -> String {
+    format!("test-{}", tag(root))
+}
+
 fn config_toml(root: &Path, extra: &str) -> String {
     format!(
         r#"
-instance_id = "ehgraph-embedded-test"
-domain = "test"
+instance_id = "{instance_id}"
+domain = "{domain}"
 data_dir = "{data}"
 backup_prefix = "{backup}"
 build = "test"
 {extra}
+
+[embedded]
+host_replicas = 1
 
 [auth]
 mode = "bearer"
@@ -59,6 +82,8 @@ namespace = "*"
 read = true
 write = true
 "#,
+        instance_id = instance_id(root),
+        domain = domain(root),
         data = root.join("data").display(),
         backup = root.join("backup").display(),
     )
@@ -200,15 +225,16 @@ async fn host_mounted_routes_and_in_process_calls_share_one_instance() {
     assert_eq!(health["state"], "serving");
 
     let (_, _, metrics) = request(&host, "GET", "/ehgraph/test/metrics", None, None).await;
+    let (id, dom) = (instance_id(dir.path()), domain(dir.path()));
     assert!(
-        metrics.contains(
-            r#"ehgraph_info{instance_id="ehgraph-embedded-test",domain="test",mode="embedded"} 1"#
-        ),
+        metrics.contains(&format!(
+            r#"ehgraph_info{{instance_id="{id}",domain="{dom}",mode="embedded"}} 1"#
+        )),
         "{metrics}"
     );
-    assert!(metrics.contains(
-        r#"ehgraph_graph_version{instance_id="ehgraph-embedded-test",domain="test",namespace="lab"} 1"#
-    ));
+    assert!(metrics.contains(&format!(
+        r#"ehgraph_graph_version{{instance_id="{id}",domain="{dom}",namespace="lab"}} 1"#
+    )));
     graph.shutdown(Duration::from_secs(5)).await;
 }
 
@@ -570,4 +596,107 @@ async fn a_torn_tail_from_a_host_crash_is_discarded_and_appends_continue() {
         assert!(node.ok, "{id} lost after torn tail + reopen: {node:?}");
         assert_eq!(node.graph_version, Some(2));
     }
+}
+
+// ---- E2: an embedded instance is a single writer, guaranteed by declaration.
+
+fn with_embedded(root: &Path, section: &str) -> GraphConfig {
+    let text = config_toml(root, "").replace("[embedded]\nhost_replicas = 1\n", section);
+    GraphConfig::from_toml(&text).unwrap()
+}
+
+fn refusal(cfg: GraphConfig) -> ehgraph::EhError {
+    match EhGraph::open_embedded(cfg) {
+        Err(err) => err,
+        Ok(_) => panic!("an embedded writer opened without a single-writer guarantee"),
+    }
+}
+
+#[test]
+fn embedded_refuses_without_a_declared_single_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = refusal(with_embedded(dir.path(), ""));
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(err.message.contains("host_replicas"), "{err}");
+    assert!(err.message.contains("standalone"), "{err}");
+    // Nothing was opened: the directory is not locked and was not created.
+    assert!(!dir.path().join("data").exists());
+
+    // The standalone server ignores the section entirely.
+    drop(EhGraph::open_standalone(with_embedded(dir.path(), "")).unwrap());
+}
+
+#[test]
+fn embedded_refuses_a_multi_replica_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = refusal(with_embedded(dir.path(), "[embedded]\nhost_replicas = 2\n"));
+    assert!(err.message.contains("2 replicas"), "{err}");
+    assert!(err.message.contains("standalone"), "{err}");
+}
+
+#[test]
+fn only_ordinal_zero_and_the_leader_may_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = refusal(with_embedded(
+        dir.path(),
+        "[embedded]\nhost_replicas = 1\nhost_ordinal = 1\n",
+    ));
+    assert!(err.message.contains("ordinal 1"), "{err}");
+    let err = refusal(with_embedded(
+        dir.path(),
+        "[embedded]\nhost_replicas = 1\nleader = false\n",
+    ));
+    assert!(err.message.contains("leader"), "{err}");
+
+    let graph = EhGraph::open_embedded(with_embedded(
+        dir.path(),
+        "[embedded]\nhost_replicas = 1\nhost_ordinal = 0\nleader = true\n",
+    ))
+    .unwrap();
+    assert!(graph.call("ops", "graph.instance.info", &json!({})).ok);
+}
+
+#[test]
+fn an_unknown_embedded_key_is_a_config_error_not_a_silent_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = config_toml(dir.path(), "")
+        .replace("host_replicas = 1\n", "host_replicas = 1\nreplicas = 3\n");
+    assert!(GraphConfig::from_toml(&text).is_err());
+}
+
+#[tokio::test]
+async fn a_second_embedded_primary_for_the_same_instance_or_domain_fails_fast() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let c = tempfile::tempdir().unwrap();
+    let first = EhGraph::open_embedded_async(config(a.path()))
+        .await
+        .unwrap();
+
+    // Same instance_id, different data directory: the lock cannot see it, the
+    // identity claim does.
+    let mut same_instance = config(b.path());
+    same_instance.instance_id = instance_id(a.path());
+    let err = refusal(same_instance);
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(
+        err.message.contains("already open in this process"),
+        "{err}"
+    );
+
+    // Different instance, same domain: two primaries for one domain.
+    let mut same_domain = config(c.path());
+    same_domain.domain = domain(a.path());
+    let err = refusal(same_domain.clone());
+    assert_eq!(err.code, ErrorCode::Conflict);
+    assert!(
+        err.message
+            .contains(&format!("domain {}", domain(a.path()))),
+        "{err}"
+    );
+
+    // Shutdown releases the claim with the lock; the domain can then open again.
+    assert!(first.shutdown(Duration::from_secs(5)).await.lock_released);
+    let reopened = EhGraph::open_embedded_async(same_domain).await.unwrap();
+    reopened.shutdown(Duration::from_secs(5)).await;
 }

@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::arrow_batch::{
     batches_to_ipc, edges_to_batch, ipc_to_edges, ipc_to_nodes, nodes_to_batch,
 };
+use crate::format::{current_format, decode_marked, legacy_format};
 use crate::frame::{self, decode_part};
-use crate::lock::DirLock;
+use crate::lock::{DirLock, IdentityClaim};
 use crate::state::{
     absorb_frame, plan_deactivate, plan_upsert, stamp_ops, Idempo, MaterializedGraph,
 };
@@ -30,6 +31,11 @@ pub struct StoreConfig {
     /// Parts also seal when they are at least this old. `Duration::ZERO` seals after every commit.
     pub seal_max_age: Duration,
     pub snapshot_keep: usize,
+    /// Also claim `instance_id` and `domain` process-wide ([`IdentityClaim`]), so a
+    /// second primary for the same instance or domain in this process is refused
+    /// even on another directory. Set for embedded instances (E2); a standalone
+    /// process serves one instance and leaves it off.
+    pub claim_identity: bool,
 }
 
 impl StoreConfig {
@@ -42,6 +48,7 @@ impl StoreConfig {
             seal_max_records: 1024,
             seal_max_age: Duration::from_secs(30),
             snapshot_keep: 16,
+            claim_identity: false,
         }
     }
 }
@@ -122,7 +129,10 @@ pub struct BackupNamespace {
 /// One instance's durable directory. The process holds `data_dir/LOCK`.
 pub struct Store {
     cfg: StoreConfig,
+    // Field order is drop order: the directory lock goes before the identity claim,
+    // so a reopen that wins the claim never finds the directory still locked.
     _lock: DirLock,
+    _identity: Option<IdentityClaim>,
     inner: Mutex<Inner>,
 }
 
@@ -143,8 +153,14 @@ struct Namespace {
     last_write_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+// ⚠ Every struct below is read back from disk. `deny_unknown_fields` plus the
+// top-level `format` marker make an older build refuse a file a newer one wrote
+// (E9, see `format.rs`). Any shape change here bumps `STORE_FORMAT`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Manifest {
+    #[serde(default = "legacy_format")]
+    format: u32,
     version: u64,
     namespace: String,
     parts: Vec<PartMeta>,
@@ -152,6 +168,7 @@ struct Manifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PartMeta {
     seq: u64,
     file: String,
@@ -163,6 +180,7 @@ struct PartMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SnapshotMeta {
     snapshot_id: String,
     graph_version: u64,
@@ -175,7 +193,10 @@ struct SnapshotMeta {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HeadFile {
+    #[serde(default = "legacy_format")]
+    format: u32,
     graph_version: u64,
     sealed_version: u64,
     manifest_version: u64,
@@ -183,13 +204,19 @@ struct HeadFile {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ActiveMeta {
+    #[serde(default = "legacy_format")]
+    format: u32,
     opened_at_ms: i64,
     seq: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InstanceFile {
+    #[serde(default = "legacy_format")]
+    format: u32,
     instance_id: String,
     domain: String,
 }
@@ -199,6 +226,11 @@ impl Store {
         if cfg.instance_id.is_empty() || cfg.domain.is_empty() {
             return Err(EhError::invalid("instance_id and domain are required"));
         }
+        let identity = if cfg.claim_identity {
+            Some(IdentityClaim::acquire(&cfg.instance_id, &cfg.domain)?)
+        } else {
+            None
+        };
         let lock = DirLock::acquire(&cfg.data_dir)?;
         write_instance_file(&cfg)?;
         let namespaces = load_namespaces(&cfg)?;
@@ -211,6 +243,7 @@ impl Store {
         Ok(Self {
             cfg,
             _lock: lock,
+            _identity: identity,
             inner: Mutex::new(Inner { namespaces }),
         })
     }
@@ -472,6 +505,7 @@ impl Store {
             files.push((self.cfg.data_dir.join(&manifest_rel), manifest_rel));
             let head_relative = PathBuf::from("namespaces").join(name).join("head.json");
             let head = HeadFile {
+                format: current_format(),
                 graph_version: ns.sealed_version,
                 sealed_version: ns.sealed_version,
                 manifest_version: ns.manifest.version,
@@ -724,7 +758,7 @@ fn deactivate_hash(request: &DeactivateRequest) -> Result<String, EhError> {
 fn write_instance_file(cfg: &StoreConfig) -> Result<(), EhError> {
     let path = cfg.data_dir.join("instance.json");
     if path.exists() {
-        let current: InstanceFile = serde_json::from_slice(&fs::read(&path)?)?;
+        let current: InstanceFile = decode_marked(&fs::read(&path)?, &path)?;
         if current.instance_id != cfg.instance_id || current.domain != cfg.domain {
             return Err(EhError::conflict(format!(
                 "data directory belongs to {} (domain {}), not {} (domain {})",
@@ -734,6 +768,7 @@ fn write_instance_file(cfg: &StoreConfig) -> Result<(), EhError> {
         return Ok(());
     }
     let body = serde_json::to_vec_pretty(&InstanceFile {
+        format: current_format(),
         instance_id: cfg.instance_id.clone(),
         domain: cfg.domain.clone(),
     })?;
@@ -1015,7 +1050,7 @@ fn scan_active(
         + 1;
     let meta_path = dir.join("active.meta.json");
     let opened = if meta_path.exists() {
-        let meta: ActiveMeta = serde_json::from_slice(&fs::read(&meta_path)?)?;
+        let meta: ActiveMeta = decode_marked(&fs::read(&meta_path)?, &meta_path)?;
         meta.opened_at_ms
     } else {
         now_ms()
@@ -1039,6 +1074,7 @@ fn ensure_namespace<'a>(
         fs::create_dir_all(dir.join("snapshots"))?;
         fs::create_dir_all(dir.join("derived"))?;
         let manifest = Manifest {
+            format: current_format(),
             version: 0,
             namespace: namespace.to_string(),
             parts: Vec::new(),
@@ -1051,6 +1087,7 @@ fn ensure_namespace<'a>(
         atomic_write(
             &dir.join("changelog").join("active.meta.json"),
             &serde_json::to_vec(&ActiveMeta {
+                format: current_format(),
                 opened_at_ms: opened,
                 seq: 1,
             })?,
@@ -1137,6 +1174,7 @@ fn seal_namespace(cfg: &StoreConfig, ns: &mut Namespace, namespace: &str) -> Res
     atomic_write(
         &dir.join("active.meta.json"),
         &serde_json::to_vec(&ActiveMeta {
+            format: current_format(),
             opened_at_ms: ns.active_opened_ms,
             seq: ns.next_seq,
         })?,
@@ -1225,13 +1263,14 @@ fn read_manifest(cfg: &StoreConfig, namespace: &str) -> Result<Manifest, EhError
     let path = ns_dir(cfg, namespace).join("manifest.json");
     if !path.exists() {
         return Ok(Manifest {
+            format: current_format(),
             version: 0,
             namespace: namespace.to_string(),
             parts: Vec::new(),
             snapshots: Vec::new(),
         });
     }
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    decode_marked(&fs::read(&path)?, &path)
 }
 
 fn write_manifest(cfg: &StoreConfig, namespace: &str, manifest: &Manifest) -> Result<(), EhError> {
@@ -1246,11 +1285,12 @@ fn read_head_file(cfg: &StoreConfig, namespace: &str) -> Result<Option<HeadFile>
     if !path.exists() {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+    Ok(Some(decode_marked(&fs::read(&path)?, &path)?))
 }
 
 fn write_head_file(cfg: &StoreConfig, namespace: &str, ns: &Namespace) -> Result<(), EhError> {
     let head = HeadFile {
+        format: current_format(),
         graph_version: ns.head,
         sealed_version: ns.sealed_version,
         manifest_version: ns.manifest.version,

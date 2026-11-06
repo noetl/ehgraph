@@ -254,9 +254,15 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
   - The MVP enforces this with one replica plus a data-directory lock, and a second
     process on the same data directory MUST refuse to start.
   - In embedded mode the lock is held by the host process, and a second handle on the same
-    directory in the SAME process MUST also be refused. A host MUST NOT run two processes
-    embedding the same instance on separate volumes; the lock cannot detect that
-    (research E2).
+    directory in the SAME process MUST also be refused, as MUST a second embedded primary
+    for the same `instance_id` or `domain` on another directory.
+  - An embedded writer MUST refuse to start unless the host declares a single writer
+    (`[embedded] host_replicas = 1`; `host_ordinal = 0` and `leader = true` where the
+    host has them). The lock MUST NOT be relied on across pods. A domain whose host cannot
+    make the declaration runs standalone (research E2, decided 2026-11-06).
+- **FR-026**: **On-disk format marker**: every JSON file in a data directory or backup
+  carries `format`. A reader MUST refuse (not ignore) a newer format or an unknown field,
+  name the file, and write nothing. Any shape change bumps the format (research E9).
   - Read replicas or a standby are a later stage (research R4). They MUST NOT be enabled
     until election plus store-side fencing are in place.
 

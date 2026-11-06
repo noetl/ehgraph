@@ -96,3 +96,32 @@ fn two_instances_stay_isolated_across_backup_and_restore() {
         b_before.nodes
     );
 }
+
+/// E9: a restore by an older build refuses a backup a newer build shipped, and
+/// refuses BEFORE copying, so the target is not left half-restored.
+#[test]
+fn restore_refuses_a_backup_from_a_newer_format_without_copying() {
+    let dir = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let store = Store::open(StoreConfig::for_tests(dir.path().to_path_buf())).unwrap();
+    write(&store, "lab", "device:sw1");
+    let checkpoint = ship(&store, backup.path(), 1_000).unwrap();
+    assert_eq!(checkpoint.format, ehgraph_store::format::STORE_FORMAT);
+    drop(store);
+
+    let path = backup.path().join("checkpoint.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    value["format"] = serde_json::Value::from(ehgraph_store::format::STORE_FORMAT + 1);
+    std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let target = tempfile::tempdir().unwrap();
+    let err = restore(backup.path(), target.path()).unwrap_err();
+    assert!(err.message.contains("checkpoint.json"), "{}", err.message);
+    assert!(
+        err.message.contains("newer than this build"),
+        "{}",
+        err.message
+    );
+    assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+}

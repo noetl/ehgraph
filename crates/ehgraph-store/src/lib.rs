@@ -9,9 +9,10 @@
 //! Graph bytes never go to an EHDB instance or dataset. They live under `data_dir`.
 
 mod arrow_batch;
+pub mod format;
 mod frame;
 mod lock;
-pub use lock::DirLock;
+pub use lock::{DirLock, IdentityClaim};
 mod state;
 mod store;
 

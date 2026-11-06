@@ -157,8 +157,15 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   mounted routes plus in-process calls on one instance, same-process and cross-process
   lock (both directions), shutdown/drop release, maintenance on the host runtime, idle
   expiry by the sweep, host crash after ack, and torn tail from a host crash.
-- [ ] T050 noetl-server integration: pin `ehgraph` by tag, config sub-table, mount routes,
-  and lifecycle wiring. This is a different repository and needs owner decisions E1–E4.
+- [ ] T050 noetl-server integration: pin `ehgraph`, config sub-table, mount routes,
+  and lifecycle wiring (`noetl/server`). Owner decided E2/E4 on 2026-11-06.
+- [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
+  primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
+  leader). Tests in `embedded.rs`.
+- [X] T053 E9 on-disk format marker (`ehgraph-store/src/format.rs`, FR-026): `format` on
+  every on-disk JSON file, strict decode, refusal names the file and writes nothing;
+  restore checks the checkpoint before copying. Tests in `format_marker.rs`,
+  `roundtrip.rs`.
 - [X] T051 Constitution 3.0.0 adopted on the user's authorization to merge (2026-11-06).
   E1–E9 and the register's "revisit" rows stay open to the owner and do not block.
 

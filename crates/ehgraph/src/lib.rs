@@ -14,11 +14,18 @@
 //!
 //! # What embedding changes
 //!
-//! - **Single writer.** The data-directory lock is held by the *host* process.
-//!   A second handle on the same directory — in this process or another — is
-//!   refused. ⚠ The library cannot see a host's replica count: if two host pods
-//!   each embed the same `instance_id` on their own volumes, they are two primaries
-//!   for one domain. Only one host process may embed a given instance.
+//! - **Single writer (E2).** Three guards, from cheapest to widest:
+//!   1. the data-directory lock: a second handle on the same directory, in this
+//!      process or another on the same volume, is refused;
+//!   2. a process-wide identity claim: a second embedded primary for the same
+//!      `instance_id` *or* `domain` in this process is refused even on another
+//!      directory;
+//!   3. the host's declaration ([`EmbeddedConfig`]): an embedded instance refuses
+//!      to start unless the host declares `host_replicas = 1` (and, where it has
+//!      them, ordinal 0 / leader). Two host pods on two volumes can't see each
+//!      other's locks, so embedded mode never relies on the lock across pods.
+//!
+//!   A domain whose host can't make that declaration runs standalone.
 //! - **Lifecycle.** The host owns the tokio runtime, tracing, and signals. This
 //!   crate installs none of them. Background maintenance (session sweep, scheduled
 //!   backup) runs only after [`EhGraph::start_maintenance`], is tied to the handle,
@@ -48,7 +55,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 pub use auth::{authenticate_header, authenticate_token};
-pub use config::{AuthConfig, BudgetConfig, Grant, GraphConfig, SessionConfig, StoreSection};
+pub use config::{
+    AuthConfig, BudgetConfig, EmbeddedConfig, Grant, GraphConfig, SessionConfig, StoreSection,
+};
 pub use ehgraph_api::{Caller, ToolSpec};
 pub use ehgraph_backup::{restore, Checkpoint};
 pub use ehgraph_core::{EhError, Envelope, ErrorCode, InstanceIdentity, Role};
@@ -151,9 +160,14 @@ impl EhGraph {
                  auth.allow_disabled_embedded = true for a local-only host",
             ));
         }
+        if mode == Mode::Embedded {
+            config.embedded.check_single_writer(&config.domain)?;
+        }
         let identity = config.identity()?;
         let build = config.build_label();
-        let store = Arc::new(Store::open(config.store_config())?);
+        let mut store_config = config.store_config();
+        store_config.claim_identity = mode == Mode::Embedded;
+        let store = Arc::new(Store::open(store_config)?);
         let sessions = Arc::new(SessionRegistry::new(config.limits()));
         let engine = Arc::new(Engine {
             store,

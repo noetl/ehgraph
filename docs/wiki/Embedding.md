@@ -39,10 +39,25 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
 
 ## Rules for a host
 
-- **One host process per instance.** The lock refuses a second handle in the same process
-  and a second process on the same directory. It cannot see two pods that embed the same
-  `instance_id` on two different volumes. That is two primaries for one domain. If the
-  host runs several replicas, embed on one of them only, or keep that domain standalone.
+- **Single writer, by declaration (E2).** An embedded instance refuses to open unless the
+  host declares it is the only writer:
+
+  ```toml
+  [embedded]
+  host_replicas = 1   # required; anything else refuses
+  host_ordinal = 0    # optional: a StatefulSet pod index; only 0 may write
+  leader = true       # optional: if the host runs an election, only the leader may write
+  ```
+
+  The lock refuses a second handle on one directory (in this process or another), and a
+  process-wide claim refuses a second embedded primary for the same `instance_id` or
+  `domain`. Neither can see a second *pod* on its own volume, so embedded mode never relies
+  on them across pods. **A domain whose host cannot declare a single writer runs
+  standalone.** The declaration is not proof: a host that runs two replicas and declares one
+  defeats it, so the host needs its own replica checks too (noetl-server refuses on
+  sharding, NATS-KV coherence, execution affinity, or a StatefulSet ordinal > 0).
+- **Domains (E4).** `noetl-cluster` is embedded in noetl-server at `/ehgraph/noetl-cluster`.
+  `network` (qnetmon) runs standalone.
 - **Use the async entry points** from async code (`open_embedded_async`, `call_async`,
   `Client::call_async`). Writes fsync.
 - **Call `start_maintenance`.** Without it, idle sessions never expire and the budget
@@ -52,5 +67,8 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
   `auth.allow_disabled_embedded = true` is also set for a local-only host.
 - **Backups:** `backup_interval_s`, `EhGraph::backup_now`, or `POST <prefix>/v1/admin/backup`
   (operator grant). The `ehgraph backup` CLI cannot run while the host holds the lock.
-- **Upgrades and rollbacks** go with the host's release. See research E9 before the first
-  on-disk format change.
+- **Upgrades and rollbacks** go with the host's release. Every on-disk JSON file carries a
+  `format` marker and is decoded strictly (E9): rolling the host back past a format change
+  makes ehgraph **refuse to open** with a message naming the file, rather than silently
+  dropping what it doesn't understand. Roll forward, or restore a backup the older build
+  took. Any change to a marked file's shape bumps `STORE_FORMAT`.

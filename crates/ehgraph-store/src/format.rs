@@ -24,8 +24,9 @@
 //! # Rule for future changes
 //!
 //! Any change to a marked file's shape — a new field, even an optional one — bumps
-//! [`STORE_FORMAT`]. Readers before the bump then refuse the data directory rather
-//! than misreading it. Roll forward, or restore a backup taken by the older build.
+//! [`STORE_FORMAT`], and the files that use it are written at the new format. Readers
+//! before the bump then refuse the data directory rather than misreading it. Roll
+//! forward, or restore a backup taken by the older build.
 //! Change-log frames carry their own per-frame version (`frame.rs`) and are not
 //! covered here.
 
@@ -35,17 +36,30 @@ use ehgraph_core::EhError;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-/// The newest on-disk format this build reads and the one it writes.
-pub const STORE_FORMAT: u32 = 1;
+/// The newest on-disk format this build reads.
+///
+/// | Format | Change |
+/// |---|---|
+/// | 1 | the MVP shape (no marker means 1) |
+/// | 2 | a **compacted** namespace manifest: `floor_version` and `floor_snapshot` (C02, noetl/ehgraph#4) |
+///
+/// A file is written at the lowest format that describes it: everything is format 1
+/// except the manifest of a namespace that has been compacted. So an older build can
+/// still open a data directory until compaction has actually run on it.
+pub const STORE_FORMAT: u32 = 2;
+
+/// The format of a namespace manifest that has a compaction floor.
+pub const COMPACTED_MANIFEST_FORMAT: u32 = 2;
 
 /// The `format` of a file written before the marker existed.
 pub fn legacy_format() -> u32 {
     1
 }
 
-/// The value written into every marked file.
+/// The value written into every marked file whose shape is unchanged since format 1
+/// (all of them except a compacted manifest).
 pub fn current_format() -> u32 {
-    STORE_FORMAT
+    1
 }
 
 /// Decode a marked JSON file, refusing a newer format or an unknown field.

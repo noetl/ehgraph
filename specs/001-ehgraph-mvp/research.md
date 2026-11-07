@@ -298,7 +298,7 @@ not block anything.
 | ID | Question (ref) | Provisional answer, as implemented | Revisit |
 |---|---|---|---|
 | C01 | Schema per namespace or schemaless (Q1, FR-001) | Schemaless unless `data_dir/schemas/<ns>.json` exists. `strict: true` rejects unknown types and missing required properties. | low |
-| C02 | Snapshot cadence and retention (Q2, FR-003) | On demand (`graph.snapshot.create`). Keep the newest 16. Log segments are never compacted. | **yes**: the log grows without bound |
+| C02 | Snapshot cadence and retention (Q2, FR-003) | Snapshots on demand, newest 16 kept (never the floor snapshot). **Compaction implemented (noetl/ehgraph#4), off by default:** after a successful backup, a prefix of sealed parts that is shipped, covered by a full snapshot written at the new floor, and outside the idempotency window (or keyless) is removed. Crash-safe order: snapshot, manifest (format 2, `floor_version` + pinned `floor_snapshot`), then delete. Open removes leftovers at or below the floor. Versions below the floor are `NOT_FOUND`. Metrics: log parts, bytes, floor, replay time. | When to enable per domain (it blocks rollback past this release) |
 | C03 | Fixed operations vs openCypher/GQL (Q3, FR-005) | Fixed tools only. | low |
 | C04 | First-class `kind: graph` (Q4, FR-006) | No. MCP + HTTP, plus the in-process `EhGraph` API in embedded mode. | low |
 | C05 | Token type; NoETL auth integration (Q5, FR-008) | Static bearer tokens with read/write grants per namespace in the instance config, identical in both modes. `*` is an operator grant. No `check_playbook_access`. | **yes**: keychain / NoETL auth (E3) |

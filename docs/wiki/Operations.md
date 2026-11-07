@@ -39,6 +39,39 @@ The rendered copy for `network` is under `deploy/instances/`. CI checks that it 
 
 The Service DNS used by a standalone domain's catalog resource is `ehgraph-<domain>.ehgraph.svc.cluster.local:8080`.
 
+## Change-log compaction
+
+The change log is the authority, so without compaction it grows for the life of a namespace, and so does replay on open. With compaction on, sealed parts are folded into a full snapshot after each successful backup:
+
+```toml
+[store]
+compaction = true      # off by default
+compact_min_parts = 8  # compact only when at least this many parts can go
+```
+
+A prefix of sealed parts is dropped only when every part in it meets all three conditions:
+
+- it is **shipped**: at or below the backup checkpoint's `backed_up_version`. A part that was never backed up is never dropped;
+- it is **covered** by a full snapshot written exactly at the new floor version;
+- it is **outside the idempotency window**, or records no idempotency key. Its keys are already forgotten (C23), so the key window is unchanged.
+
+Compaction is crash-safe. The steps run in this order:
+
+1. the floor snapshot is made durable;
+2. the new manifest, carrying `floor_version` and the pinned `floor_snapshot`, is written;
+3. only then are the part files deleted.
+
+A crash before step 2 leaves the old log in force. A crash after it leaves part files that the next open removes rather than re-adopts. The same applies to a restore from a backup prefix, which keeps every part it ever received.
+
+What changes for readers and operators:
+
+- **History:** `graph_at` / `graph.version.info` at a version **below the floor** returns `NOT_FOUND`. The floor itself and everything after it stay readable.
+- **Snapshot retention** (`snapshot_keep`) never removes the floor snapshot. It now retires snapshots only after the new manifest is durable.
+- **Format:** a compacted manifest is format 2. Older builds refuse it (E9).
+- **Metrics** (per namespace): `ehgraph_log_parts`, `ehgraph_log_bytes`, `ehgraph_log_floor_version` and `ehgraph_open_replay_seconds`.
+
+Compaction runs under the backup's ship lock, so it never deletes a part that a ship is still copying.
+
 ## Memory
 
 An instance holds three kinds of memory:

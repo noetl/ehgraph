@@ -263,6 +263,8 @@ reports healthy, `discover` lists the tools, and `undeploy` removes ehgraph clea
 - **FR-026**: **On-disk format marker**: every JSON file in a data directory or backup
   carries `format`. A reader MUST refuse (not ignore) a newer format or an unknown field,
   name the file, and write nothing. Any shape change bumps the format (research E9).
+  Each file is written at the lowest format that describes it (format 2 = a compacted
+  manifest, C02).
   - Read replicas or a standby are a later stage (research R4). They MUST NOT be enabled
     until election plus store-side fencing are in place.
 

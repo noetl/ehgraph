@@ -24,12 +24,13 @@ Session lifecycle is also written to the process log: opened, loaded, refreshed,
 
 ```bash
 scripts/render-deploy.sh network
-scripts/render-deploy.sh noetl-cluster
 ```
 
-Rendered copies for the two initial instances are under `deploy/instances/`. The container image is built from the repository `Dockerfile` (`ehgraph serve --config /etc/ehgraph/config.toml`).
+This is for standalone domains only. `noetl-cluster` is embedded in noetl-server (E4), so it has no StatefulSet. The script and the mutating lifecycle playbooks refuse it, and `deploy/instances/ehgraph-noetl-cluster/README.md` explains why. Its graph is served at `http://noetl.noetl.svc.cluster.local:8082/ehgraph/noetl-cluster`.
 
-The Service DNS used by the catalog resources is `ehgraph-<domain>.ehgraph.svc.cluster.local:8080`.
+The rendered copy for `network` is under `deploy/instances/`. CI checks that it matches the template. The container image is built from the repository `Dockerfile` (`ehgraph serve --config /etc/ehgraph/config.toml`).
+
+The Service DNS used by a standalone domain's catalog resource is `ehgraph-<domain>.ehgraph.svc.cluster.local:8080`.
 
 ## Backup and restore
 

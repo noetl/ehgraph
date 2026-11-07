@@ -27,7 +27,7 @@ Status: **MVP server** on top of the spec in `specs/001-ehgraph-mvp/`. One `ehgr
 ```bash
 cargo build -p ehgraph-server
 scripts/ehgraph-local.sh start network          # 127.0.0.1:8081
-scripts/ehgraph-local.sh start noetl-cluster    # 127.0.0.1:8082
+scripts/ehgraph-local.sh start noetl-cluster    # 127.0.0.1:8082, local dev only; in a cluster it is embedded
 curl -s http://127.0.0.1:8081/healthz
 ```
 
@@ -36,6 +36,6 @@ curl -s http://127.0.0.1:8081/healthz
 - User and developer docs: [docs/wiki/Home.md](docs/wiki/Home.md) (GitHub wiki page names, kept in-repo)
 - Wiki: <https://github.com/noetl/ehgraph/wiki>
 
-Expected first consumers: a NoETL cluster topology (`ehgraph-noetl-cluster`), and qnetmon (`ehgraph-network`).
+Expected first consumers: a NoETL cluster topology (`ehgraph-noetl-cluster`, embedded in noetl-server at `/ehgraph/noetl-cluster`), and qnetmon (`ehgraph-network`, standalone).
 
 EHDB is a design reference for the change-log frame, sealed parts, and age seal. This repository does not depend on it, and it never stores graph data in an EHDB dataset. See `specs/001-ehgraph-mvp/research.md` (R3 implementation note, Q15).

@@ -1,4 +1,6 @@
 # Render with scripts/render-deploy.sh <domain>.
+# Standalone domains only. Embedded domains (noetl-cluster) have no StatefulSet;
+# the render script refuses them (E4, noetl/ehgraph#10).
 # One StatefulSet per topology domain. replicas is 1: a second process on the
 # same volume is refused by the data-directory lock.
 apiVersion: apps/v1

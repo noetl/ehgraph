@@ -1,26 +1,32 @@
+# EMBEDDED (decision E4): this graph runs inside noetl-server and is served on the
+# server's own Service under /ehgraph/noetl-cluster. There is no ehgraph StatefulSet
+# for this domain, and there must not be one: a standalone pod would be a second
+# primary on another volume that no lock can see (E2, noetl/ehgraph#10).
+#
+# So this resource has no deploy, undeploy, redeploy, or restart verb. The lifecycle
+# playbooks also refuse spec.deployment.mode: embedded. Rolling this graph is rolling
+# noetl-server. status and discover are read-only and stay.
+# Calls carry a Bearer token granted in the embedded ehgraph config (the auth on
+# the mount is ehgraph's own, not noetl-server's).
 apiVersion: noetl.io/v2
 kind: Mcp
 metadata:
   name: ehgraph-noetl-cluster
   path: mcp/ehgraph/noetl-cluster
 spec:
-  url: http://ehgraph-noetl-cluster.ehgraph.svc.cluster.local:8080/mcp
+  url: http://noetl.noetl.svc.cluster.local:8082/ehgraph/noetl-cluster/mcp
   protocol: mcp/1.0
   lifecycle:
-    deploy: automation/agents/ehgraph/lifecycle/deploy
-    undeploy: automation/agents/ehgraph/lifecycle/undeploy
-    redeploy: automation/agents/ehgraph/lifecycle/redeploy
-    restart: automation/agents/ehgraph/lifecycle/restart
     status: automation/agents/ehgraph/lifecycle/status
     discover: automation/agents/ehgraph/lifecycle/discover
   discovery:
-    initialize_url: http://ehgraph-noetl-cluster.ehgraph.svc.cluster.local:8080/healthz
-    tools_list_url: http://ehgraph-noetl-cluster.ehgraph.svc.cluster.local:8080/mcp/tools
+    initialize_url: http://noetl.noetl.svc.cluster.local:8082/ehgraph/noetl-cluster/healthz
+    tools_list_url: http://noetl.noetl.svc.cluster.local:8082/ehgraph/noetl-cluster/mcp/tools
     refresh_via: automation/agents/ehgraph/lifecycle/discover
   deployment:
-    namespace: ehgraph
-    release_name: ehgraph-noetl-cluster
+    mode: embedded
+    host: noetl-server
+    mount: /ehgraph/noetl-cluster
     domain: noetl-cluster
-    service_port: 8080
-    storage: 20Gi
-    backup_prefix: gs://noetl-ehgraph/ehgraph-noetl-cluster
+    # The data directory and backup_prefix are set in the host's ehgraph config
+    # (NOETL_EHGRAPH_CONFIG), not here.

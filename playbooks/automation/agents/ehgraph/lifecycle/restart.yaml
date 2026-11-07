@@ -22,6 +22,22 @@ workflow:
       cmds:
         - |
           set -euo pipefail
+          # E2/E4 guard (noetl/ehgraph#10): an embedded domain's primary lives in its host.
+          # Deploying, deleting, or rolling a standalone pod for it would make a second
+          # primary on another volume, or act on the wrong workload. Refuse.
+          EMBEDDED_DOMAINS="noetl-cluster"
+          MODE='{{ workload.mcp_resource.spec.deployment.mode | default("standalone") }}'
+          GUARD_DOMAIN='{{ workload.mcp_resource.spec.deployment.domain | default(workload.mcp_resource.path | split("/") | last) }}'
+          if [ "$MODE" = "embedded" ]; then
+            echo "refusing restart: ${GUARD_DOMAIN} is embedded (spec.deployment.mode: embedded); roll its host instead" >&2
+            exit 2
+          fi
+          for embedded in $EMBEDDED_DOMAINS; do
+            if [ "$GUARD_DOMAIN" = "$embedded" ]; then
+              echo "refusing restart: ${GUARD_DOMAIN} is an embedded domain (E4) and has no standalone StatefulSet" >&2
+              exit 2
+            fi
+          done
           NAME='{{ workload.mcp_resource.metadata.name }}'
           NAMESPACE='{{ workload.mcp_resource.spec.deployment.namespace | default("ehgraph") }}'
           kubectl delete pod "${NAME}-0" -n "$NAMESPACE" --wait=true

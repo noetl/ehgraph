@@ -157,8 +157,15 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   mounted routes plus in-process calls on one instance, same-process and cross-process
   lock (both directions), shutdown/drop release, maintenance on the host runtime, idle
   expiry by the sweep, host crash after ack, and torn tail from a host crash.
-- [ ] T050 noetl-server integration: pin `ehgraph`, config sub-table, mount routes,
-  and lifecycle wiring (`noetl/server`). Owner decided E2/E4 on 2026-11-06.
+- [X] T050 noetl-server integration (`noetl/server#556`, merged as `cdb1e25`): rev-pinned
+  `ehgraph`, the config file at `NOETL_EHGRAPH_CONFIG`, routes mounted at
+  `/ehgraph/noetl-cluster`, and the lifecycle (open at start, shutdown after the listener
+  drains). It refuses multi-writer topologies and is off unless `NOETL_EHGRAPH_EMBEDDED=true`.
+  Arming it in a cluster is an ops step, not part of this task.
+- [X] T054 Embedded domains have no standalone deploy path (`noetl/ehgraph#10`): removed
+  the `noetl-cluster` StatefulSet, repointed its `kind: Mcp` resource at the noetl-server
+  mount (`mode: embedded`, read-only verbs only), and made `render-deploy.sh` and the
+  mutating lifecycle playbooks refuse it. Lint: `crates/ehgraph/tests/deploy_manifests.rs`.
 - [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
   primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
   leader). Tests in `embedded.rs`.

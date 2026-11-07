@@ -13,7 +13,9 @@ The normative list is `specs/001-ehgraph-mvp/contracts/graphdb.md`. This page is
 | Health | `.../healthz` |
 | Tool list | `.../mcp/tools` |
 
-Initial resources: `ehgraph-network`, `ehgraph-noetl-cluster`. Files are under `playbooks/automation/agents/ehgraph/resources/`.
+That table is for a standalone domain. An embedded domain is served by its host: `ehgraph-noetl-cluster` is at `http://noetl.noetl.svc.cluster.local:8082/ehgraph/noetl-cluster/mcp`. Its resource sets `spec.deployment.mode: embedded`, and it has only the `status` and `discover` verbs (see [Embedding](Embedding)).
+
+Initial resources: `ehgraph-network` (standalone) and `ehgraph-noetl-cluster` (embedded in noetl-server). Files are under `playbooks/automation/agents/ehgraph/resources/`.
 
 Lifecycle playbooks are shared and read `workload.mcp_resource`, which the NoETL lifecycle dispatcher supplies. Source: `playbooks/automation/agents/ehgraph/lifecycle/`. Backup and restore are separate playbooks under `ops/` because `kind: Mcp` has no backup verb.
 

@@ -58,6 +58,17 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
   sharding, NATS-KV coherence, execution affinity, or a StatefulSet ordinal > 0).
 - **Domains (E4).** `noetl-cluster` is embedded in noetl-server at `/ehgraph/noetl-cluster`.
   `network` (qnetmon) runs standalone.
+- **An embedded domain has no StatefulSet.** A standalone pod for the same domain would be
+  a second primary on its own volume, invisible to both the lock and the claim. So for an
+  embedded domain:
+  - its `kind: Mcp` resource sets `spec.deployment.mode: embedded` and points at the host
+    mount, for example `http://noetl.noetl.svc.cluster.local:8082/ehgraph/noetl-cluster/mcp`;
+  - the resource has only the read-only `status` and `discover` verbs. Rolling the graph is
+    rolling the host;
+  - `scripts/render-deploy.sh` and the `deploy`, `undeploy`, `redeploy`, and `restart`
+    playbooks refuse it (`EMBEDDED_DOMAINS`, and `mode: embedded`);
+  - `crates/ehgraph/tests/deploy_manifests.rs` fails CI if a manifest for it reappears or
+    the resource and the guards drift.
 - **Use the async entry points** from async code (`open_embedded_async`, `call_async`,
   `Client::call_async`). Writes fsync.
 - **Call `start_maintenance`.** Without it, idle sessions never expire and the budget

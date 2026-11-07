@@ -5,7 +5,7 @@ ehgraph (Event Horizon Graph) is a **topology database**. You run one instance p
 Examples:
 
 - `ehgraph-network` — network topology, the store qnetmon reads
-- `ehgraph-noetl-cluster` — NoETL services and cluster topology
+- `ehgraph-noetl-cluster` — NoETL services and cluster topology, embedded in noetl-server
 
 Each instance is a single primary in this release. It has its own change log, snapshots, and object-store backup. Instances do not know about each other. Read replicas are planned and not built. Sharding is deferred.
 

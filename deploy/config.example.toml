@@ -2,10 +2,17 @@
 instance_id = "ehgraph-network"
 domain = "network"
 data_dir = "/var/lib/ehgraph"
+# A directory, or a GCS prefix: backup_prefix = "gs://noetl-ehgraph/ehgraph-network"
 backup_prefix = "/var/backups/ehgraph/ehgraph-network"
 listen = "0.0.0.0:8080"
 role = "primary"
 backup_interval_s = 30
+
+# Only for a gs:// backup_prefix. These are the defaults.
+# [backup]
+# endpoint = "https://storage.googleapis.com"
+# auth = "metadata"        # GKE Workload Identity; or "env:VAR" (bearer token), or "none" (emulator)
+# timeout_s = 60
 
 [budgets]
 global_bytes = 268435456

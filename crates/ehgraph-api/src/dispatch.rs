@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,7 +54,7 @@ pub struct Engine {
     pub store: Arc<Store>,
     pub sessions: Arc<SessionRegistry>,
     pub identity: InstanceIdentity,
-    pub backup_prefix: PathBuf,
+    pub backup: Arc<ehgraph_backup::Backup>,
     pub build: String,
     pub global_bytes: u64,
     pub per_session_bytes: u64,
@@ -586,7 +585,7 @@ impl Engine {
         if let Some(namespace) = &parsed.namespace {
             self.require(caller, namespace, false)?;
         }
-        let checkpoint = ehgraph_backup::read_checkpoint(&self.backup_prefix)?;
+        let checkpoint = self.backup.checkpoint()?;
         let now = now_ms();
         let mut rows = Vec::new();
         for summary in self.store.summaries()? {

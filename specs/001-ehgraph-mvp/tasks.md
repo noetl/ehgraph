@@ -166,6 +166,11 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   the `noetl-cluster` StatefulSet, repointed its `kind: Mcp` resource at the noetl-server
   mount (`mode: embedded`, read-only verbs only), and made `render-deploy.sh` and the
   mutating lifecycle playbooks refuse it. Lint: `crates/ehgraph/tests/deploy_manifests.rs`.
+- [X] T055 C19 object-store backup (`noetl/ehgraph#8`): `ObjectStore` with `FsStore` and
+  `GcsStore` (JSON API, `ifGenerationMatch=0`, retries; metadata/env/none/host token),
+  `[backup]` config, cached checkpoint for metrics, failure and last-shipped metrics,
+  alert rules. Tests: `ehgraph-backup/tests/gcs_roundtrip.rs` against a fake GCS,
+  `embedded.rs` config validation.
 - [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
   primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
   leader). Tests in `embedded.rs`.

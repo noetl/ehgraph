@@ -59,7 +59,27 @@ pub use config::{
     AuthConfig, BudgetConfig, EmbeddedConfig, Grant, GraphConfig, SessionConfig, StoreSection,
 };
 pub use ehgraph_api::{Caller, ToolSpec};
-pub use ehgraph_backup::{restore, Checkpoint};
+pub use ehgraph_backup::{
+    restore, Backup, Checkpoint, ObjectStore, TargetConfig as BackupTargetConfig, TokenProvider,
+};
+
+/// Host-supplied pieces for [`EhGraph::open_embedded_with`].
+#[derive(Clone, Default)]
+pub struct OpenOptions {
+    /// Credentials for a `gs://` backup target, overriding `[backup] auth`. A host
+    /// that already holds a Google token source (noetl-server's `gcp_auth`) passes it
+    /// here so the embedded graph does not run a second auth path. Without it the
+    /// default is the GKE metadata server, which on GKE is the same Workload Identity.
+    pub backup_token: Option<Arc<dyn TokenProvider>>,
+}
+
+impl std::fmt::Debug for OpenOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenOptions")
+            .field("backup_token", &self.backup_token.is_some())
+            .finish()
+    }
+}
 pub use ehgraph_core::{EhError, Envelope, ErrorCode, InstanceIdentity, Role};
 
 /// How an instance is reached. Reported by `/healthz` and the `ehgraph_info` metric.
@@ -132,22 +152,35 @@ impl EhGraph {
     /// data-directory lock and replays the change log. From async code use
     /// [`EhGraph::open_embedded_async`].
     pub fn open_embedded(config: GraphConfig) -> Result<Self, EhError> {
-        Self::open(config, Mode::Embedded)
+        Self::open(config, Mode::Embedded, OpenOptions::default())
+    }
+
+    /// [`EhGraph::open_embedded`] with host-supplied [`OpenOptions`].
+    pub fn open_embedded_with(config: GraphConfig, options: OpenOptions) -> Result<Self, EhError> {
+        Self::open(config, Mode::Embedded, options)
     }
 
     /// [`EhGraph::open_embedded`] on the blocking pool.
     pub async fn open_embedded_async(config: GraphConfig) -> Result<Self, EhError> {
-        tokio::task::spawn_blocking(move || Self::open(config, Mode::Embedded))
+        Self::open_embedded_with_async(config, OpenOptions::default()).await
+    }
+
+    /// [`EhGraph::open_embedded_with`] on the blocking pool.
+    pub async fn open_embedded_with_async(
+        config: GraphConfig,
+        options: OpenOptions,
+    ) -> Result<Self, EhError> {
+        tokio::task::spawn_blocking(move || Self::open(config, Mode::Embedded, options))
             .await
             .map_err(|err| EhError::unavailable(format!("open task failed: {err}")))?
     }
 
     /// Open an instance for the standalone server binary.
     pub fn open_standalone(config: GraphConfig) -> Result<Self, EhError> {
-        Self::open(config, Mode::Standalone)
+        Self::open(config, Mode::Standalone, OpenOptions::default())
     }
 
-    fn open(config: GraphConfig, mode: Mode) -> Result<Self, EhError> {
+    fn open(config: GraphConfig, mode: Mode, options: OpenOptions) -> Result<Self, EhError> {
         config.validate()?;
         ehgraph_api::ensure_primary(config.role()?)?;
         if mode == Mode::Embedded
@@ -167,13 +200,20 @@ impl EhGraph {
         let build = config.build_label();
         let mut store_config = config.store_config();
         store_config.claim_identity = mode == Mode::Embedded;
+        let backup = Arc::new(Backup::new(config.backup_target(options.backup_token)?));
         let store = Arc::new(Store::open(store_config)?);
+        // Best effort: know the last checkpoint before the first metrics scrape, so a
+        // restart does not report the whole log as unshipped. A failure here (bucket
+        // unreachable) must not stop the graph from opening; status retries it.
+        if let Err(err) = backup.checkpoint() {
+            tracing::warn!(%err, target = %backup.describe(), "could not read the backup checkpoint at open");
+        }
         let sessions = Arc::new(SessionRegistry::new(config.limits()));
         let engine = Arc::new(Engine {
             store,
             sessions,
             identity: identity.clone(),
-            backup_prefix: config.backup_prefix.clone(),
+            backup,
             build: build.clone(),
             global_bytes: config.budgets.global_bytes,
             per_session_bytes: config.budgets.per_session_bytes,
@@ -316,12 +356,12 @@ impl EhGraph {
         }
     }
 
-    /// Seal and ship the change log to `backup_prefix` now. Host-trusted: no
+    /// Seal and ship the change log to `backup_prefix` (a directory or `gs://`) now. Host-trusted: no
     /// grant check. The HTTP admin route requires an operator grant before it
     /// calls this.
     pub fn backup_now(&self) -> Result<Checkpoint, EhError> {
         let engine = self.engine()?;
-        ehgraph_backup::ship(&engine.store, &engine.backup_prefix, ehgraph_core::now_ms())
+        engine.backup.ship(&engine.store, ehgraph_core::now_ms())
     }
 
     /// Expire idle and over-lifetime sessions now.

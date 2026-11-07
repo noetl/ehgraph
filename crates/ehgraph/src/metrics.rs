@@ -50,9 +50,18 @@ pub fn render(engine: &Engine, mode: &str) -> String {
             ));
         }
     }
-    let checkpoint = ehgraph_backup::read_checkpoint(&engine.backup_prefix)
-        .ok()
-        .flatten();
+    // Cached: a scrape never reads the backup target (it may be a bucket).
+    let checkpoint = engine.backup.cached_checkpoint();
+    out.push_str("# TYPE ehgraph_backup_failures_total counter\n");
+    out.push_str(&format!(
+        "ehgraph_backup_failures_total{{instance_id=\"{instance}\",domain=\"{domain}\"}} {}\n",
+        engine.backup.failures()
+    ));
+    out.push_str("# TYPE ehgraph_backup_last_shipped_timestamp_seconds gauge\n");
+    out.push_str(&format!(
+        "ehgraph_backup_last_shipped_timestamp_seconds{{instance_id=\"{instance}\",domain=\"{domain}\"}} {}\n",
+        checkpoint.as_ref().map(|c| c.shipped_at_ms / 1000).unwrap_or(0)
+    ));
     let now = now_ms();
     if let Ok(summaries) = engine.store.summaries() {
         out.push_str("# TYPE ehgraph_graph_version gauge\n");

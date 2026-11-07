@@ -67,6 +67,9 @@ pub fn render(engine: &Engine, mode: &str) -> String {
         out.push_str("# TYPE ehgraph_graph_version gauge\n");
         out.push_str("# TYPE ehgraph_backup_lag_versions gauge\n");
         out.push_str("# TYPE ehgraph_backup_lag_seconds gauge\n");
+        out.push_str("# TYPE ehgraph_idempotency_keys gauge\n");
+        out.push_str("# TYPE ehgraph_idempotency_key_bytes gauge\n");
+        out.push_str("# TYPE ehgraph_idempotency_keys_evicted counter\n");
         for summary in summaries {
             let ns = summary.namespace;
             out.push_str(&format!(
@@ -82,6 +85,18 @@ pub fn render(engine: &Engine, mode: &str) -> String {
             ));
             out.push_str(&format!(
                 "ehgraph_backup_lag_seconds{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {lag_seconds}\n"
+            ));
+            out.push_str(&format!(
+                "ehgraph_idempotency_keys{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {}\n",
+                summary.idempotency_keys
+            ));
+            out.push_str(&format!(
+                "ehgraph_idempotency_key_bytes{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {}\n",
+                summary.idempotency_key_bytes
+            ));
+            out.push_str(&format!(
+                "ehgraph_idempotency_keys_evicted{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {}\n",
+                summary.idempotency_keys_evicted
             ));
         }
     }

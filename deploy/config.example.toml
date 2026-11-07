@@ -29,6 +29,9 @@ seal_max_records = 1024
 # Age seal is on. This bounds the unshipped tail (the backup RPO window).
 seal_max_age_s = 30
 snapshot_keep = 16
+# Idempotency keys: remembered this long on the log clock, and at most this many per namespace.
+idempotency_window_s = 86400
+idempotency_max_keys = 100000
 
 [auth]
 mode = "bearer"

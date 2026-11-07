@@ -18,7 +18,7 @@ use crate::format::{current_format, decode_marked, legacy_format};
 use crate::frame::{self, decode_part};
 use crate::lock::{DirLock, IdentityClaim};
 use crate::state::{
-    absorb_frame, plan_deactivate, plan_upsert, stamp_ops, Idempo, MaterializedGraph,
+    absorb_frame, plan_deactivate, plan_upsert, stamp_ops, KeyLimits, KeyWindow, MaterializedGraph,
 };
 
 #[derive(Clone, Debug)]
@@ -36,6 +36,8 @@ pub struct StoreConfig {
     /// even on another directory. Set for embedded instances (E2); a standalone
     /// process serves one instance and leaves it off.
     pub claim_identity: bool,
+    /// How long and how many idempotency keys each namespace remembers (C23).
+    pub idempotency: KeyLimits,
 }
 
 impl StoreConfig {
@@ -49,6 +51,7 @@ impl StoreConfig {
             seal_max_age: Duration::from_secs(30),
             snapshot_keep: 16,
             claim_identity: false,
+            idempotency: KeyLimits::default(),
         }
     }
 }
@@ -80,6 +83,11 @@ pub struct NsSummary {
     pub last_write_ms: i64,
     pub nodes: u64,
     pub edges: u64,
+    /// Idempotency keys remembered now, their estimated bytes, and how many were
+    /// forgotten since open (C23).
+    pub idempotency_keys: u64,
+    pub idempotency_key_bytes: u64,
+    pub idempotency_keys_evicted: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,7 +153,7 @@ struct Namespace {
     sealed_version: u64,
     manifest: Manifest,
     graph: MaterializedGraph,
-    keys: BTreeMap<String, Idempo>,
+    keys: KeyWindow,
     active_records: u64,
     active_bytes: u64,
     active_opened_ms: i64,
@@ -333,6 +341,9 @@ impl Store {
                 last_write_ms: ns.last_write_ms,
                 nodes: ns.graph.nodes.len() as u64,
                 edges: ns.graph.edges.len() as u64,
+                idempotency_keys: ns.keys.len() as u64,
+                idempotency_key_bytes: ns.keys.bytes(),
+                idempotency_keys_evicted: ns.keys.evicted(),
             })
             .collect())
     }
@@ -614,12 +625,8 @@ impl Store {
                 append_raw(&self.cfg, ns, namespace, &bytes)?;
                 if publish {
                     if let FrameBody::Idempotency(note) = note {
-                        crate::state::remember(
-                            &mut ns.keys,
-                            &note.key,
-                            note.graph_version,
-                            &note.body_hash,
-                        );
+                        ns.keys
+                            .remember(&note.key, note.graph_version, &note.body_hash);
                     }
                     let _ = write_head_file(&self.cfg, namespace, ns);
                     maybe_seal(&self.cfg, ns, namespace)?;
@@ -805,7 +812,7 @@ fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, Eh
         .max()
         .unwrap_or(0);
     let mut graph = MaterializedGraph::default();
-    let mut keys = BTreeMap::new();
+    let mut keys = KeyWindow::new(cfg.idempotency);
     let base = manifest
         .snapshots
         .iter()
@@ -951,7 +958,8 @@ fn materialize_to(
         Some(snap) => load_snapshot_graph(cfg, namespace, snap)?,
         None => MaterializedGraph::default(),
     };
-    let mut keys = BTreeMap::new();
+    // Discarded: materializing an old version never answers an idempotent retry.
+    let mut keys = KeyWindow::new(cfg.idempotency);
     for frame in &frames {
         let apply = match frame {
             FrameBody::Commit(batch) => {
@@ -1097,7 +1105,7 @@ fn ensure_namespace<'a>(
             sealed_version: 0,
             manifest,
             graph: MaterializedGraph::default(),
-            keys: BTreeMap::new(),
+            keys: KeyWindow::new(cfg.idempotency),
             active_records: 0,
             active_bytes: 0,
             active_opened_ms: opened,

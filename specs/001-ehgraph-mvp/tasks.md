@@ -171,6 +171,10 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   `[backup]` config, cached checkpoint for metrics, failure and last-shipped metrics,
   alert rules. Tests: `ehgraph-backup/tests/gcs_roundtrip.rs` against a fake GCS,
   `embedded.rs` config validation.
+- [X] T056 C23 bounded idempotency keys (`noetl/ehgraph#5`): `KeyWindow` (age on the log
+  clock + count cap, evicted at the same log position live and on replay), `[store]`
+  `idempotency_window_s` / `idempotency_max_keys`, per-namespace key/bytes/evicted metrics.
+  Tests: `ehgraph-store/tests/idempotency_window.rs`.
 - [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
   primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
   leader). Tests in `embedded.rs`.

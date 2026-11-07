@@ -319,7 +319,7 @@ not block anything.
 | C20 | Initial domains and names (Q20, FR-022/023) | `ehgraph-network` / `network`, `ehgraph-noetl-cluster` / `noetl-cluster`. | low |
 | C21 | Missing edge endpoints (data model) | `INVALID_ARGUMENT`. No placeholder nodes. | low |
 | C22 | Nested maps in properties (data model) | Allowed. Timestamps are `{"$timestamp": …}`. | low |
-| C23 | Idempotency-key window (data model) | The life of the namespace log. The hash covers namespace, elements and `source`. | **yes**: memory grows with keys |
+| C23 | Idempotency-key window (data model) | **Implemented (noetl/ehgraph#5):** bounded per namespace by `idempotency_window_s` (default 24 h) on the log clock (max committed `ts_ms`, monotonic) and by `idempotency_max_keys` (default 100,000), oldest first. Eviction happens at the same log position live and on replay, so the window is rebuilt exactly. A retry after the window is a new write (documented in API-and-MCP). Metrics: keys, bytes, evicted. The hash covers namespace, elements and `source`. Compaction (C02) must keep the window's frames or carry the keys. | Window length per domain |
 | C24 | MCP layer: hand-rolled or a crate (plan) | A hand-rolled JSON-RPC subset (`2024-11-05`: initialize, ping, tools/list, tools/call). | low |
 | C25 | Does `kind: Mcp` lifecycle dispatch pass the resource? (contract) | Yes, as assumed by the shared playbooks: the dispatcher fills `workload.mcp_resource`, and the playbook derives `domain` from the last path segment. Not executed against a NoETL runtime (T016). | **yes**: verify on a real dispatcher |
 | C26 | Session lifecycle event sink (contract, FR-020) | `tracing` logs + the in-process registry event list + metrics. No NoETL callback. | medium |

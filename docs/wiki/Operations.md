@@ -15,6 +15,11 @@
 | `ehgraph_graph_version{namespace}` | Durable head |
 | `ehgraph_backup_lag_versions{namespace}` | Head minus the last shipped sealed version |
 | `ehgraph_backup_lag_seconds{namespace}` | Time since that ship, when the lag is non-zero |
+| `ehgraph_backup_failures_total` | Ships that failed since open |
+| `ehgraph_backup_last_shipped_timestamp_seconds` | Unix time of the last checkpoint; 0 if never shipped |
+| `ehgraph_idempotency_keys{namespace}` | Idempotency keys remembered (bounded, C23) |
+| `ehgraph_idempotency_key_bytes{namespace}` | Their estimated resident bytes |
+| `ehgraph_idempotency_keys_evicted{namespace}` | Keys forgotten since open (replay included) |
 
 Session lifecycle is also written to the process log: opened, loaded, refreshed, closed, expired, evicted, load failed. The fields are session id, owner, namespace, version, and bytes.
 

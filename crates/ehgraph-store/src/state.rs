@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use ehgraph_core::{
     same_edge_content, same_node_content, ChangeBatch, Edge, EdgeInput, EhError, FrameBody,
@@ -258,26 +258,181 @@ fn node_matches(
         .all(|(key, pred)| node.props.get(key).is_some_and(|value| pred.matches(value)))
 }
 
-pub fn remember(keys: &mut BTreeMap<String, Idempo>, key: &str, version: u64, hash: &str) {
-    keys.insert(
-        key.to_string(),
-        Idempo {
-            version,
-            hash: hash.to_string(),
-        },
-    );
+/// How long and how many idempotency keys a namespace remembers (register C23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyLimits {
+    /// A key is forgotten once the log clock is more than this past the frame that
+    /// recorded it.
+    pub max_age_ms: i64,
+    /// At most this many keys; the oldest go first.
+    pub max_keys: usize,
+}
+
+impl Default for KeyLimits {
+    fn default() -> Self {
+        Self {
+            max_age_ms: 24 * 60 * 60 * 1000,
+            max_keys: 100_000,
+        }
+    }
+}
+
+/// Bytes charged per remembered key on top of the key and hash strings: the map
+/// entry, the order queue entry, and allocation headers. An estimate, for metrics.
+const KEY_OVERHEAD_BYTES: u64 = 96;
+
+/// The bounded set of idempotency keys one namespace remembers (register C23).
+///
+/// # Semantics
+///
+/// - **The clock is the log's, not the wall clock.** It is the highest `ts_ms` of
+///   any commit absorbed so far, and it never goes backwards. Replaying the same log
+///   therefore rebuilds exactly the same window, whenever and wherever it is opened.
+///   A commit whose `ts_ms` is far in the future advances the clock and so ages out
+///   every older key at once; `ts_ms` is the writer's clock, so writers keep it sane.
+/// - A key is **stamped** with the clock at the frame that recorded it (a commit, or
+///   the idempotency note a no-op write leaves).
+/// - A key is **forgotten** when `clock - stamp > max_age_ms`, or when more than
+///   `max_keys` are remembered (oldest first). Eviction runs as frames are absorbed,
+///   so it happens at the same log position live and on replay.
+/// - **A retry after its key is forgotten is a new write.** It is planned against the
+///   current graph: an unchanged upsert is a no-op, but a retry that lands after
+///   someone else changed the same elements re-applies the old payload, and a reused
+///   key with a different payload is accepted instead of being a conflict. So
+///   `max_age_ms` must exceed the longest time a caller may retry. The default is
+///   24 h.
+#[derive(Debug, Clone)]
+pub struct KeyWindow {
+    limits: KeyLimits,
+    keys: HashMap<String, Remembered>,
+    /// Insertion order. Stamps are non-decreasing along it, so the front is the
+    /// oldest by both age and count. Entries for a re-recorded key are skipped by seq.
+    order: VecDeque<(u64, String)>,
+    clock_ms: i64,
+    next_seq: u64,
+    bytes: u64,
+    evicted: u64,
+}
+
+#[derive(Debug, Clone)]
+struct Remembered {
+    idempo: Idempo,
+    stamp_ms: i64,
+    seq: u64,
+}
+
+impl Default for KeyWindow {
+    fn default() -> Self {
+        Self::new(KeyLimits::default())
+    }
+}
+
+impl KeyWindow {
+    pub fn new(limits: KeyLimits) -> Self {
+        Self {
+            limits,
+            keys: HashMap::new(),
+            order: VecDeque::new(),
+            clock_ms: i64::MIN,
+            next_seq: 0,
+            bytes: 0,
+            evicted: 0,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Idempo> {
+        self.keys.get(key).map(|r| &r.idempo)
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Estimated resident bytes of the remembered keys.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Keys forgotten since this window was built (replay included).
+    pub fn evicted(&self) -> u64 {
+        self.evicted
+    }
+
+    /// The log clock, or `None` before any commit.
+    pub fn clock_ms(&self) -> Option<i64> {
+        (self.clock_ms != i64::MIN).then_some(self.clock_ms)
+    }
+
+    /// Advance the log clock to `ts_ms` (never backwards) and forget what aged out.
+    pub fn advance(&mut self, ts_ms: i64) {
+        if ts_ms > self.clock_ms {
+            self.clock_ms = ts_ms;
+        }
+        self.evict();
+    }
+
+    /// Remember `key`, stamped with the current log clock.
+    pub fn remember(&mut self, key: &str, version: u64, hash: &str) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let stamp_ms = self.clock_ms;
+        let entry = Remembered {
+            idempo: Idempo {
+                version,
+                hash: hash.to_string(),
+            },
+            stamp_ms,
+            seq,
+        };
+        if let Some(old) = self.keys.insert(key.to_string(), entry) {
+            self.bytes -= entry_bytes(key, &old.idempo.hash);
+        }
+        self.bytes += entry_bytes(key, hash);
+        self.order.push_back((seq, key.to_string()));
+        self.evict();
+    }
+
+    fn evict(&mut self) {
+        let floor = self.clock_ms.saturating_sub(self.limits.max_age_ms);
+        while let Some((seq, key)) = self.order.front() {
+            let live = self.keys.get(key).filter(|r| r.seq == *seq);
+            let Some(entry) = live else {
+                // Superseded by a later record of the same key.
+                self.order.pop_front();
+                continue;
+            };
+            let too_old = self.clock_ms != i64::MIN && entry.stamp_ms < floor;
+            if !too_old && self.keys.len() <= self.limits.max_keys {
+                break;
+            }
+            let (_, key) = self.order.pop_front().expect("front");
+            if let Some(old) = self.keys.remove(&key) {
+                self.bytes -= entry_bytes(&key, &old.idempo.hash);
+                self.evicted += 1;
+            }
+        }
+    }
+}
+
+fn entry_bytes(key: &str, hash: &str) -> u64 {
+    (key.len() + hash.len()) as u64 + KEY_OVERHEAD_BYTES
 }
 
 pub fn absorb_frame(
     graph: &mut MaterializedGraph,
-    keys: &mut BTreeMap<String, Idempo>,
+    keys: &mut KeyWindow,
     frame: &FrameBody,
     apply_commits: bool,
 ) -> Result<(), EhError> {
     match frame {
         FrameBody::Commit(batch) => {
+            keys.advance(batch.ts_ms);
             if let Some(key) = &batch.idempotency_key {
-                remember(keys, key, batch.graph_version, &batch.body_hash);
+                keys.remember(key, batch.graph_version, &batch.body_hash);
             }
             if apply_commits {
                 graph.apply_batch(batch)?;
@@ -289,7 +444,7 @@ pub fn absorb_frame(
             graph_version,
             ..
         }) => {
-            remember(keys, key, *graph_version, body_hash);
+            keys.remember(key, *graph_version, body_hash);
         }
     }
     Ok(())

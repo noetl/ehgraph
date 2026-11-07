@@ -261,3 +261,101 @@ pub fn same_edge_content(existing: &Edge, incoming: &Edge) -> bool {
         && existing.active
         && existing.last_seen == incoming.last_seen
 }
+
+// ---------------------------------------------------------------------------
+// Resident-size estimates (register C11, noetl/ehgraph#6).
+//
+// The materialized graph is always resident: every element lives in a BTreeMap
+// keyed by id, and every edge also has an entry in the out- and in-adjacency maps.
+// These estimates are what the resident-graph budget charges. They are calibrated
+// against a counting allocator in `ehgraph-store/tests/resident_bytes.rs`, which
+// fails if they drift more than 25% from the measured heap.
+
+// Measured shape (Rust std BTreeMap, B = 6, 64-bit):
+// - A non-empty map allocates whole leaves of 11 slots, so a 2-entry props map costs
+//   a full leaf (about 11 x (key + value) bytes). This dominates small elements.
+// - A large map filled in key order keeps its leaves about half full, so an entry
+//   costs about twice its key + value. Random-order inserts fill better; 2x is the
+//   conservative figure.
+
+const LEAF_SLOTS: u64 = 11;
+const LEAF_HEADER: u64 = 16;
+const LARGE_MAP_FACTOR: u64 = 2;
+
+fn heap(s: &str) -> u64 {
+    s.len() as u64
+}
+
+/// Bytes of the leaf (and internal) nodes of a small map with `n` entries of
+/// `entry` bytes each.
+fn small_map_nodes(n: u64, entry: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let leaves = if n <= LEAF_SLOTS {
+        1
+    } else {
+        (2 * n).div_ceil(LEAF_SLOTS) + 1
+    };
+    leaves * (LEAF_SLOTS * entry + LEAF_HEADER)
+}
+
+fn props_bytes(props: &BTreeMap<String, PropValue>) -> u64 {
+    let entry = (std::mem::size_of::<String>() + std::mem::size_of::<PropValue>()) as u64;
+    small_map_nodes(props.len() as u64, entry)
+        + props
+            .iter()
+            .map(|(k, v)| heap(k) + prop_value_heap(v))
+            .sum::<u64>()
+}
+
+fn prop_value_heap(value: &PropValue) -> u64 {
+    match value {
+        PropValue::String(s) => heap(s),
+        PropValue::List(items) => items
+            .iter()
+            .map(|v| std::mem::size_of::<PropValue>() as u64 + prop_value_heap(v))
+            .sum(),
+        PropValue::Map(map) => props_bytes(map),
+        PropValue::Int(_) | PropValue::Float(_) | PropValue::Bool(_) | PropValue::Timestamp(_) => 0,
+    }
+}
+
+fn opt_heap(s: &Option<String>) -> u64 {
+    s.as_deref().map(heap).unwrap_or(0)
+}
+
+impl Node {
+    /// Estimated resident bytes of this node in a materialized graph: its share of
+    /// the id-keyed map, the id key, and every heap string and property.
+    pub fn approx_bytes(&self) -> u64 {
+        LARGE_MAP_FACTOR * (std::mem::size_of::<String>() + std::mem::size_of::<Node>()) as u64
+            + 2 * heap(&self.id)
+            + heap(&self.type_name)
+            + opt_heap(&self.origin)
+            + heap(&self.source)
+            + heap(&self.execution_id)
+            + props_bytes(&self.props)
+    }
+}
+
+impl Edge {
+    /// Estimated resident bytes of this edge: as for [`Node::approx_bytes`], plus its
+    /// entries in the out- and in-adjacency indexes (the edge id in each endpoint's
+    /// list, with `Vec` growth slack, and a share of the endpoint keys).
+    pub fn approx_bytes(&self) -> u64 {
+        let string = std::mem::size_of::<String>() as u64;
+        let element = LARGE_MAP_FACTOR * (string + std::mem::size_of::<Edge>() as u64)
+            + 2 * heap(&self.id)
+            + heap(&self.src)
+            + heap(&self.dst)
+            + heap(&self.type_name)
+            + opt_heap(&self.origin)
+            + heap(&self.source)
+            + heap(&self.execution_id)
+            + props_bytes(&self.props);
+        let ids = 2 * (string + heap(&self.id)) * 3 / 2;
+        let endpoint_keys = 2 * (2 * string) + heap(&self.src) + heap(&self.dst);
+        element + ids + endpoint_keys
+    }
+}

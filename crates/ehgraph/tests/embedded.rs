@@ -773,3 +773,46 @@ fn backup_target_is_validated_at_open() {
     assert_eq!(line("ehgraph_backup_failures_total{"), "1");
     assert_eq!(line("ehgraph_backup_last_shipped_timestamp_seconds{"), "0");
 }
+
+/// C11: embedded budgets come from the host's memory limit, and budgets that would
+/// take more than half of it refuse at open instead of OOM-killing the host later.
+#[test]
+fn embedded_budgets_are_sized_from_the_host_and_refuse_when_too_big() {
+    const MIB: u64 = 1024 * 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let base = config_toml(dir.path(), "");
+    let with =
+        |budgets: &str| GraphConfig::from_toml(&format!("{base}\n[budgets]\n{budgets}\n")).unwrap();
+
+    // 2 GiB host: 10% for the graph, 10% for sessions, a quarter of that per session.
+    let graph = EhGraph::open_embedded(with("host_memory_bytes = 2147483648")).unwrap();
+    let metrics = graph.metrics_text();
+    let budget = |kind: &str| -> u64 {
+        metrics
+            .lines()
+            .find(|l| {
+                l.starts_with("ehgraph_budget_bytes{") && l.contains(&format!("kind=\"{kind}\""))
+            })
+            .unwrap_or_else(|| panic!("no {kind} budget in\n{metrics}"))
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(budget("resident_graph"), 2048 * MIB / 10);
+    assert_eq!(budget("sessions_global"), 2048 * MIB / 10);
+    assert_eq!(budget("session"), 2048 * MIB / 40);
+    drop(graph);
+
+    // Explicit budgets over half the host refuse, naming the numbers.
+    let err = EhGraph::open_embedded(with(
+        "host_memory_bytes = 1073741824\nresident_graph_bytes = 536870912",
+    ))
+    .err()
+    .unwrap();
+    assert!(err.message.contains("at most half"), "{}", err.message);
+
+    // Unknown keys in [budgets] are config errors, not silently ignored.
+    assert!(GraphConfig::from_toml(&format!("{base}\n[budgets]\nglobal = 1\n")).is_err());
+}

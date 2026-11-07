@@ -175,6 +175,10 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   clock + count cap, evicted at the same log position live and on replay), `[store]`
   `idempotency_window_s` / `idempotency_max_keys`, per-namespace key/bytes/evicted metrics.
   Tests: `ehgraph-store/tests/idempotency_window.rs`.
+- [X] T057 C11 memory budgets (`noetl/ehgraph#6`): calibrated `approx_bytes` estimates,
+  `resident_graph_bytes` enforced before logging, embedded budgets derived from the host limit
+  and capped at half of it, budget metrics, and no namespace clone per upsert. Tests:
+  `resident_bytes.rs` (counting allocator), `resident_budget.rs`, `budgets.rs`, `embedded.rs`.
 - [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
   primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
   leader). Tests in `embedded.rs`.

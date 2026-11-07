@@ -17,6 +17,10 @@ backup_interval_s = 30
 [budgets]
 global_bytes = 268435456
 per_session_bytes = 67108864
+# Materialized graphs of all namespaces together; 0 = unlimited (the standalone default).
+# Embedded instances derive all three from host_memory_bytes or the cgroup limit.
+# resident_graph_bytes = 536870912
+# host_memory_bytes = 4294967296
 
 [session]
 idle_timeout_s = 300

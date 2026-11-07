@@ -58,6 +58,8 @@ pub struct Engine {
     pub build: String,
     pub global_bytes: u64,
     pub per_session_bytes: u64,
+    /// `0` is unlimited.
+    pub resident_graph_bytes: u64,
 }
 
 impl Engine {
@@ -550,6 +552,7 @@ impl Engine {
                     "sealed_version": summary.sealed_version,
                     "nodes": summary.nodes,
                     "edges": summary.edges,
+                    "graph_bytes": summary.graph_bytes,
                 })
             })
             .collect();
@@ -564,6 +567,7 @@ impl Engine {
                 "budgets": {
                     "global_bytes": self.global_bytes,
                     "per_session_bytes": self.per_session_bytes,
+                    "resident_graph_bytes": self.resident_graph_bytes,
                 },
                 "namespaces": namespaces,
             }),

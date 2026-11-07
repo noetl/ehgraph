@@ -73,7 +73,17 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
   `Client::call_async`). Writes fsync.
 - **Call `start_maintenance`.** Without it, idle sessions never expire and the budget
   fills up.
-- **Size the budget** (`[budgets]`) inside the host's memory limit.
+- **Budgets come out of the host's memory (C11).** Unless they are set explicitly, the
+  embedded defaults are taken from the host's limit: `[budgets] host_memory_bytes`, or else
+  the container's cgroup limit.
+  - The resident graph gets 10% of the host.
+  - Sessions get 10% in total, and a quarter of that per session.
+  - Open **refuses** if the graph and session budgets together exceed half the host.
+  - With no detectable limit, the fixed defaults apply and the graph is capped at 256 MiB.
+
+  A write that would grow the graph past `resident_graph_bytes` is refused with
+  `MEMORY_BUDGET_EXCEEDED`, and nothing is logged. See Operations, "Memory", for
+  measured sizes.
 - **Auth stays on.** `auth.mode = "disabled"` is refused when embedded, unless
   `auth.allow_disabled_embedded = true` is also set for a local-only host.
 - **Backups:** `backup_interval_s`, `EhGraph::backup_now`, or `POST <prefix>/v1/admin/backup`

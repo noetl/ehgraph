@@ -40,6 +40,7 @@
 //!   routes are mounted on the host's listener, not a loopback-only port.
 
 mod auth;
+pub mod budgets;
 mod config;
 mod http;
 mod metrics;
@@ -56,7 +57,8 @@ use tokio::task::JoinHandle;
 
 pub use auth::{authenticate_header, authenticate_token};
 pub use config::{
-    AuthConfig, BudgetConfig, EmbeddedConfig, Grant, GraphConfig, SessionConfig, StoreSection,
+    AuthConfig, BudgetConfig, Budgets, EmbeddedConfig, Grant, GraphConfig, SessionConfig,
+    StoreSection,
 };
 pub use ehgraph_api::{Caller, ToolSpec};
 pub use ehgraph_backup::{
@@ -198,8 +200,10 @@ impl EhGraph {
         }
         let identity = config.identity()?;
         let build = config.build_label();
+        let budgets = config.resolved_budgets(mode == Mode::Embedded)?;
         let mut store_config = config.store_config();
         store_config.claim_identity = mode == Mode::Embedded;
+        store_config.resident_graph_bytes = budgets.resident_graph_bytes;
         let backup = Arc::new(Backup::new(config.backup_target(options.backup_token)?));
         let store = Arc::new(Store::open(store_config)?);
         // Best effort: know the last checkpoint before the first metrics scrape, so a
@@ -208,20 +212,24 @@ impl EhGraph {
         if let Err(err) = backup.checkpoint() {
             tracing::warn!(%err, target = %backup.describe(), "could not read the backup checkpoint at open");
         }
-        let sessions = Arc::new(SessionRegistry::new(config.limits()));
+        let sessions = Arc::new(SessionRegistry::new(config.limits(&budgets)));
         let engine = Arc::new(Engine {
             store,
             sessions,
             identity: identity.clone(),
             backup,
             build: build.clone(),
-            global_bytes: config.budgets.global_bytes,
-            per_session_bytes: config.budgets.per_session_bytes,
+            global_bytes: budgets.global_bytes,
+            per_session_bytes: budgets.per_session_bytes,
+            resident_graph_bytes: budgets.resident_graph_bytes,
         });
         tracing::info!(
             instance_id = %identity.instance_id,
             domain = %identity.domain,
             mode = mode.as_str(),
+            resident_graph_bytes = budgets.resident_graph_bytes,
+            session_global_bytes = budgets.global_bytes,
+            host_memory_bytes = budgets.host_memory_bytes.unwrap_or(0),
             "ehgraph instance opened"
         );
         Ok(Self {

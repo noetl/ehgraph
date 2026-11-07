@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use ehgraph_core::{
-    canonical_hash, now_ms, validate_namespace, ChangeBatch, EhError, FrameBody, IdempotencyNote,
-    SchemaConfig, Scope, WriteRequest,
+    canonical_hash, now_ms, validate_namespace, ChangeBatch, EhError, ErrorCode, FrameBody,
+    IdempotencyNote, SchemaConfig, Scope, StoredOp, WriteRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,11 @@ pub struct StoreConfig {
     pub claim_identity: bool,
     /// How long and how many idempotency keys each namespace remembers (C23).
     pub idempotency: KeyLimits,
+    /// Cap on the estimated resident bytes of all materialized graphs together (C11).
+    /// A write that would grow them past it is refused with `MEMORY_BUDGET_EXCEEDED`
+    /// before anything is logged. `0` is unlimited. Open never refuses: the log is the
+    /// authority, so an instance already over the cap opens and only refuses growth.
+    pub resident_graph_bytes: u64,
 }
 
 impl StoreConfig {
@@ -52,6 +57,7 @@ impl StoreConfig {
             snapshot_keep: 16,
             claim_identity: false,
             idempotency: KeyLimits::default(),
+            resident_graph_bytes: 0,
         }
     }
 }
@@ -88,6 +94,8 @@ pub struct NsSummary {
     pub idempotency_keys: u64,
     pub idempotency_key_bytes: u64,
     pub idempotency_keys_evicted: u64,
+    /// Estimated resident bytes of the materialized graph (C11).
+    pub graph_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +161,8 @@ struct Namespace {
     sealed_version: u64,
     manifest: Manifest,
     graph: MaterializedGraph,
+    /// Estimated resident bytes of `graph` (`approx_bytes` of every element).
+    graph_bytes: u64,
     keys: KeyWindow,
     active_records: u64,
     active_bytes: u64,
@@ -344,6 +354,7 @@ impl Store {
                 idempotency_keys: ns.keys.len() as u64,
                 idempotency_key_bytes: ns.keys.bytes(),
                 idempotency_keys_evicted: ns.keys.evicted(),
+                graph_bytes: ns.graph_bytes,
             })
             .collect())
     }
@@ -565,12 +576,15 @@ impl Store {
             return Ok(outcome);
         }
         let schema = read_schema(&self.cfg, &request.namespace)?;
+        // Plan against the live graph by reference: cloning it here made every write
+        // briefly hold a second copy of the whole namespace (C11).
+        let empty = MaterializedGraph::default();
         let existing = inner
             .namespaces
             .get(&request.namespace)
-            .map(|ns| ns.graph.clone())
-            .unwrap_or_default();
-        let ops = plan_upsert(&existing, &request, &schema)?;
+            .map(|ns| &ns.graph)
+            .unwrap_or(&empty);
+        let ops = plan_upsert(existing, &request, &schema)?;
         let namespace = request.namespace.clone();
         let key = request.idempotency_key.clone();
         let execution_id = request.execution_id.clone();
@@ -639,6 +653,22 @@ impl Store {
                 applied: 0,
             });
         }
+        let delta = graph_bytes_delta(inner.namespaces.get(namespace).map(|ns| &ns.graph), &ops);
+        if self.cfg.resident_graph_bytes > 0 && delta > 0 {
+            let resident: u64 = inner.namespaces.values().map(|ns| ns.graph_bytes).sum();
+            let after = resident.saturating_add(delta as u64);
+            if after > self.cfg.resident_graph_bytes {
+                return Err(EhError::new(
+                    ErrorCode::MemoryBudgetExceeded,
+                    format!(
+                        "resident graph budget exceeded: this write needs {delta} more bytes; \
+                         {resident} of {} are in use across namespaces. Deactivate or prune \
+                         elements, or raise [budgets] resident_graph_bytes",
+                        self.cfg.resident_graph_bytes
+                    ),
+                ));
+            }
+        }
         let ns = ensure_namespace(&self.cfg, inner, namespace)?;
         let version = ns.head + 1;
         stamp_ops(&mut ops, version);
@@ -679,6 +709,7 @@ impl Store {
             )?;
             ns.head = version;
             ns.last_write_ms = ts_ms;
+            ns.graph_bytes = (ns.graph_bytes as i64).saturating_add(delta).max(0) as u64;
         }
         write_head_file(&self.cfg, namespace, ns)?;
         maybe_seal(&self.cfg, ns, namespace)?;
@@ -854,11 +885,13 @@ fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, Eh
         .map(|part| part.last_version)
         .max()
         .unwrap_or(0);
+    let graph_bytes = graph_resident_bytes(&graph);
     let ns = Namespace {
         head: log_version,
         sealed_version,
         manifest,
         graph,
+        graph_bytes,
         keys,
         active_records,
         active_bytes,
@@ -1105,6 +1138,7 @@ fn ensure_namespace<'a>(
             sealed_version: 0,
             manifest,
             graph: MaterializedGraph::default(),
+            graph_bytes: 0,
             keys: KeyWindow::new(cfg.idempotency),
             active_records: 0,
             active_bytes: 0,
@@ -1351,4 +1385,36 @@ fn fsync_dir(path: &Path) -> Result<(), EhError> {
     let file = File::open(path)?;
     file.sync_all()?;
     Ok(())
+}
+
+/// Estimated resident bytes of a whole materialized graph.
+fn graph_resident_bytes(graph: &MaterializedGraph) -> u64 {
+    graph.nodes.values().map(|n| n.approx_bytes()).sum::<u64>()
+        + graph.edges.values().map(|e| e.approx_bytes()).sum::<u64>()
+}
+
+/// How much applying `ops` changes the estimated resident bytes of `graph`.
+/// Upserts replace whole images; a deactivation keeps the image (`active = false`).
+fn graph_bytes_delta(graph: Option<&MaterializedGraph>, ops: &[StoredOp]) -> i64 {
+    let mut delta = 0i64;
+    for op in ops {
+        match op {
+            StoredOp::UpsertNode { node } => {
+                let old = graph
+                    .and_then(|g| g.nodes.get(&node.id))
+                    .map(|n| n.approx_bytes())
+                    .unwrap_or(0);
+                delta += node.approx_bytes() as i64 - old as i64;
+            }
+            StoredOp::UpsertEdge { edge } => {
+                let old = graph
+                    .and_then(|g| g.edges.get(&edge.id))
+                    .map(|e| e.approx_bytes())
+                    .unwrap_or(0);
+                delta += edge.approx_bytes() as i64 - old as i64;
+            }
+            StoredOp::DeactivateNode { .. } | StoredOp::DeactivateEdge { .. } => {}
+        }
+    }
+    delta
 }

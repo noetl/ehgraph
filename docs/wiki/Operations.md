@@ -12,6 +12,8 @@
 | `ehgraph_resident_bytes` | Bytes held by session graphs |
 | `ehgraph_load_seconds` | Most recent session load, in seconds |
 | `ehgraph_evictions_total{reason}` | Sessions dropped under budget pressure (`budget`) |
+| `ehgraph_resident_graph_bytes{namespace}` | Estimated resident bytes of the materialized graph |
+| `ehgraph_budget_bytes{kind}` | Resolved budgets: `resident_graph` (0 = unlimited), `sessions_global`, `session` |
 | `ehgraph_graph_version{namespace}` | Durable head |
 | `ehgraph_backup_lag_versions{namespace}` | Head minus the last shipped sealed version |
 | `ehgraph_backup_lag_seconds{namespace}` | Time since that ship, when the lag is non-zero |
@@ -36,6 +38,32 @@ This is for standalone domains only. `noetl-cluster` is embedded in noetl-server
 The rendered copy for `network` is under `deploy/instances/`. CI checks that it matches the template. The container image is built from the repository `Dockerfile` (`ehgraph serve --config /etc/ehgraph/config.toml`).
 
 The Service DNS used by a standalone domain's catalog resource is `ehgraph-<domain>.ehgraph.svc.cluster.local:8080`.
+
+## Memory
+
+An instance holds three kinds of memory:
+
+| Memory | Budget | On overflow |
+|---|---|---|
+| Materialized graph, every namespace, always resident | `[budgets] resident_graph_bytes` | A growing write is refused with `MEMORY_BUDGET_EXCEEDED` before it is logged. Writes that don't grow it, and opening, are never refused. |
+| Sessions (Arrow batches) | `global_bytes`, `per_session_bytes` | Ended sessions are evicted first, then the open fails with `MEMORY_BUDGET_EXCEEDED` |
+| Idempotency keys | `[store] idempotency_max_keys` | The oldest keys are forgotten (C23) |
+
+Defaults:
+
+- **Standalone:** 256 MiB for sessions in total, 64 MiB per session, and an unlimited graph.
+- **Embedded:** derived from the host's limit (see the Embedding page). Open refuses budgets that would take more than half the host.
+
+Measured resident sizes come from `ehgraph-store/tests/resident_bytes.rs`, which counts allocations and checks that the estimates stay within 25%. The figures are requested heap; budget about 20% more for allocator overhead.
+
+| Shape | Bytes per element |
+|---|---|
+| `noetl-cluster`-like: 6 properties including a 2-entry label map; edges carry 1 property | about 1,660 |
+| Bare: no properties | about 670 |
+
+So 10^4 cluster elements take about 16 MiB, and 10^6 take about 1.6 GiB. Each non-empty property map costs a whole `BTreeMap` leaf, about 630 B, so nested maps are the expensive part.
+
+Writes plan against the live graph by reference. Earlier builds cloned the whole namespace on every upsert, which doubled peak memory per write.
 
 ## Backup and restore
 

@@ -50,6 +50,16 @@ pub fn render(engine: &Engine, mode: &str) -> String {
             ));
         }
     }
+    out.push_str("# TYPE ehgraph_budget_bytes gauge\n");
+    for (kind, value) in [
+        ("resident_graph", engine.resident_graph_bytes),
+        ("sessions_global", engine.global_bytes),
+        ("session", engine.per_session_bytes),
+    ] {
+        out.push_str(&format!(
+            "ehgraph_budget_bytes{{instance_id=\"{instance}\",domain=\"{domain}\",kind=\"{kind}\"}} {value}\n"
+        ));
+    }
     // Cached: a scrape never reads the backup target (it may be a bucket).
     let checkpoint = engine.backup.cached_checkpoint();
     out.push_str("# TYPE ehgraph_backup_failures_total counter\n");
@@ -67,6 +77,7 @@ pub fn render(engine: &Engine, mode: &str) -> String {
         out.push_str("# TYPE ehgraph_graph_version gauge\n");
         out.push_str("# TYPE ehgraph_backup_lag_versions gauge\n");
         out.push_str("# TYPE ehgraph_backup_lag_seconds gauge\n");
+        out.push_str("# TYPE ehgraph_resident_graph_bytes gauge\n");
         out.push_str("# TYPE ehgraph_idempotency_keys gauge\n");
         out.push_str("# TYPE ehgraph_idempotency_key_bytes gauge\n");
         out.push_str("# TYPE ehgraph_idempotency_keys_evicted counter\n");
@@ -85,6 +96,10 @@ pub fn render(engine: &Engine, mode: &str) -> String {
             ));
             out.push_str(&format!(
                 "ehgraph_backup_lag_seconds{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {lag_seconds}\n"
+            ));
+            out.push_str(&format!(
+                "ehgraph_resident_graph_bytes{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {}\n",
+                summary.graph_bytes
             ));
             out.push_str(&format!(
                 "ehgraph_idempotency_keys{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {}\n",

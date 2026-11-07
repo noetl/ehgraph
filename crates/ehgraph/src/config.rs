@@ -109,13 +109,7 @@ impl EmbeddedConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct BudgetConfig {
-    #[serde(default = "default_global")]
-    pub global_bytes: u64,
-    #[serde(default = "default_session_cap")]
-    pub per_session_bytes: u64,
-}
+pub use crate::budgets::{BudgetConfig, Budgets};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionConfig {
@@ -177,15 +171,6 @@ pub struct Grant {
     pub read: bool,
     #[serde(default)]
     pub write: bool,
-}
-
-impl Default for BudgetConfig {
-    fn default() -> Self {
-        Self {
-            global_bytes: default_global(),
-            per_session_bytes: default_session_cap(),
-        }
-    }
 }
 
 impl Default for SessionConfig {
@@ -308,13 +293,25 @@ impl GraphConfig {
                     * 1000,
                 max_keys: self.store.idempotency_max_keys as usize,
             },
+            // Set by open from the resolved budgets (they depend on the mode).
+            resident_graph_bytes: 0,
         }
     }
 
-    pub fn limits(&self) -> Limits {
+    /// Budgets after defaults for an embedded (`true`) or standalone instance, using
+    /// the detected container memory limit.
+    pub fn resolved_budgets(&self, embedded: bool) -> Result<Budgets, EhError> {
+        crate::budgets::resolve(
+            &self.budgets,
+            embedded,
+            crate::budgets::detect_host_memory(),
+        )
+    }
+
+    pub fn limits(&self, budgets: &Budgets) -> Limits {
         Limits {
-            global_bytes: self.budgets.global_bytes,
-            per_session_bytes: self.budgets.per_session_bytes,
+            global_bytes: budgets.global_bytes,
+            per_session_bytes: budgets.per_session_bytes,
             default_idle: Duration::from_secs(self.session.idle_timeout_s),
             default_max_lifetime: Duration::from_secs(self.session.max_lifetime_s),
             grace: Duration::from_secs(self.session.grace_s),
@@ -343,12 +340,6 @@ fn safe_label(field: &str, value: &str) -> Result<(), EhError> {
 
 fn default_role() -> String {
     "primary".into()
-}
-fn default_global() -> u64 {
-    256 * 1024 * 1024
-}
-fn default_session_cap() -> u64 {
-    64 * 1024 * 1024
 }
 fn default_idle() -> u64 {
     300

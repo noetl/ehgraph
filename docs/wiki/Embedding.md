@@ -58,6 +58,15 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
   sharding, NATS-KV coherence, execution affinity, or a StatefulSet ordinal > 0).
 - **Domains (E4).** `noetl-cluster` is embedded in noetl-server at `/ehgraph/noetl-cluster`.
   `network` (qnetmon) runs standalone.
+- **noetl-server pins a rev.** noetl/server pins this repo at `760f572` (noetl/server#557,
+  2026-11-07). That pin includes GCS backups, bounded idempotency keys, memory budgets,
+  compaction (off) and the read/write path fixes. The graph is **off** unless
+  `NOETL_EHGRAPH_EMBEDDED=true` (see `src/ehgraph_embedded.rs` there).
+  - noetl-server sets no `[budgets]`, so once armed the budgets come from the pod's
+    `resources.limits.memory`, as described below.
+  - noetl-server only calls `EhGraph`'s public API. Internal changes such as the dispatch
+    `Engine`'s backup handle don't reach it.
+  - The pin moves only in a `chore` PR, so it never cuts a server release by itself.
 - **An embedded domain has no StatefulSet.** A standalone pod for the same domain would be
   a second primary on its own volume, invisible to both the lock and the claim. So for an
   embedded domain:
@@ -79,7 +88,10 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
   - The resident graph gets 10% of the host.
   - Sessions get 10% in total, and a quarter of that per session.
   - Open **refuses** if the graph and session budgets together exceed half the host.
+  - Each derived value is at least 16 MiB.
   - With no detectable limit, the fixed defaults apply and the graph is capped at 256 MiB.
+  - `graph.instance.info` reports the resolved budgets. Check them against the host's
+    real memory use before arming.
 
   A write that would grow the graph past `resident_graph_bytes` is refused with
   `MEMORY_BUDGET_EXCEEDED`, and nothing is logged. See Operations, "Memory", for

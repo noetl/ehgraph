@@ -9,3 +9,9 @@ One line per queue item: issue, PR, merge commit, tests. Nothing deployed, relea
 - #7 (C17 perf targets + harness): ehgraph PR #16 merged 9cb6314; ai-meta pin PR #531 merged 15b4545; wiki 4c95a50; tests 109 passed / 0 failed, fmt+clippy clean. CI bench (50k, Linux): all within target except neighbors-right-after-a-write 102 ms vs 100 ms (non-gating; noted on #7).
 
 Queue done 2026-11-06. Nothing deployed, released, tagged, or armed; no live cluster touched. New behaviour that changes runtime defaults: embedded budgets are now derived from the host memory limit (C11). Compaction (C02) ships OFF.
+
+- 2026-11-07, noetl-server pin (98a3079 -> 760f572): server PR #557 merged 1b5a56b. Typed `chore`; semantic-release said "should not trigger a release", no tag, and the latest is still v3.151.3.
+  - No source change: the server uses only the `EhGraph` public API.
+  - 4 new embedded wiring tests: budgets derived from the host, refusal over half the host, MEMORY_BUDGET_EXCEEDED, backup_now through the target.
+  - Server tests 1820 passed / 0 failed / 14 ignored; clippy -D warnings clean.
+  - ai-meta repos/server pin PR #533 merged 5911887. Embedded stays OFF; nothing deployed.

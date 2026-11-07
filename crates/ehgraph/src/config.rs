@@ -137,6 +137,21 @@ pub struct StoreSection {
     pub seal_max_age_s: u64,
     #[serde(default = "default_keep")]
     pub snapshot_keep: usize,
+    /// How long an idempotency key is remembered, on the log clock (C23). A retry
+    /// later than this is a new write. Default 24 h.
+    #[serde(default = "default_idempotency_window")]
+    pub idempotency_window_s: u64,
+    /// At most this many idempotency keys per namespace, oldest forgotten first.
+    #[serde(default = "default_idempotency_max_keys")]
+    pub idempotency_max_keys: u64,
+}
+
+fn default_idempotency_window() -> u64 {
+    24 * 60 * 60
+}
+
+fn default_idempotency_max_keys() -> u64 {
+    100_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +205,8 @@ impl Default for StoreSection {
             seal_max_records: default_seal_records(),
             seal_max_age_s: default_seal_age(),
             snapshot_keep: default_keep(),
+            idempotency_window_s: default_idempotency_window(),
+            idempotency_max_keys: default_idempotency_max_keys(),
         }
     }
 }
@@ -234,6 +251,11 @@ impl GraphConfig {
         }
         if self.auth.mode != "bearer" && self.auth.mode != "disabled" {
             return Err(EhError::invalid("auth.mode must be bearer or disabled"));
+        }
+        if self.store.idempotency_window_s == 0 || self.store.idempotency_max_keys == 0 {
+            return Err(EhError::invalid(
+                "store.idempotency_window_s and store.idempotency_max_keys must be at least 1",
+            ));
         }
         // A bad backup_prefix or [backup] section is a config error at open, not at
         // the first scheduled ship. Building the target does no I/O.
@@ -281,6 +303,11 @@ impl GraphConfig {
             seal_max_age: Duration::from_secs(self.store.seal_max_age_s),
             snapshot_keep: self.store.snapshot_keep,
             claim_identity: false,
+            idempotency: ehgraph_store::KeyLimits {
+                max_age_ms: (self.store.idempotency_window_s.min(i64::MAX as u64 / 1000) as i64)
+                    * 1000,
+                max_keys: self.store.idempotency_max_keys as usize,
+            },
         }
     }
 

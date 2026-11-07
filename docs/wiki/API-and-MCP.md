@@ -73,6 +73,19 @@ Read tools take `namespace` and either `graph_session_id` or `version`. With a s
 
 JSON numbers without a fraction are integers. Nested objects and arrays are allowed. A timestamp is `{"$timestamp":"<rfc3339>"}` or `{"$timestamp": <unix millis>}`. `first_seen`, `last_seen`, `ts_ms`, and `not_seen_since` on the write tools are unix milliseconds. `ts_ms` of `0` or omitted means the server clock. Idempotency hashes the namespace, elements, and `source`. Retries may use a new `execution_id` and `ts_ms`. The same key with a different payload is `CONFLICT`.
 
+Keys are remembered for a bounded window per namespace:
+
+- **Time:** `[store] idempotency_window_s`, 24 h by default. It is measured on the **log clock**, which is the highest `ts_ms` committed so far and never goes backwards. It is not the wall clock, so reopening a namespace rebuilds exactly the same window.
+- **Count:** `[store] idempotency_max_keys`, 100,000 by default. The oldest keys go first.
+
+A retry after its key is forgotten is a new write, planned against the current graph:
+
+- an unchanged upsert is a no-op;
+- a retry that lands after someone else changed the same elements re-applies the old payload;
+- a reused key with a different payload is accepted, not reported as `CONFLICT`.
+
+Set the window longer than any caller's retry horizon. `ehgraph_idempotency_keys`, `ehgraph_idempotency_key_bytes` and `ehgraph_idempotency_keys_evicted` report it per namespace.
+
 An edge whose `src` or `dst` is missing or inactive is rejected. The whole batch is rejected. No placeholder nodes are created. Omit an edge `id` and the server uses `edge:<src>:<type>:<dst>:<origin>`.
 
 ## Catalog resource

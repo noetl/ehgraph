@@ -32,6 +32,10 @@ pub struct GraphConfig {
     /// When non-zero, the running server ships sealed parts on this interval.
     #[serde(default)]
     pub backup_interval_s: u64,
+    /// How to reach a `gs://` `backup_prefix` (endpoint, auth, timeout). Ignored for a
+    /// directory prefix.
+    #[serde(default)]
+    pub backup: ehgraph_backup::TargetConfig,
     /// Embedded only: how the host guarantees it is this instance's only writer.
     /// Ignored by the standalone server.
     #[serde(default)]
@@ -231,7 +235,23 @@ impl GraphConfig {
         if self.auth.mode != "bearer" && self.auth.mode != "disabled" {
             return Err(EhError::invalid("auth.mode must be bearer or disabled"));
         }
+        // A bad backup_prefix or [backup] section is a config error at open, not at
+        // the first scheduled ship. Building the target does no I/O.
+        self.backup_target(None)?;
         Ok(())
+    }
+
+    /// The backup target `backup_prefix` names: `gs://bucket/prefix` is Google
+    /// Cloud Storage, anything else a directory. `token` overrides `[backup] auth`.
+    pub fn backup_target(
+        &self,
+        token: Option<std::sync::Arc<dyn ehgraph_backup::TokenProvider>>,
+    ) -> Result<std::sync::Arc<dyn ehgraph_backup::ObjectStore>, EhError> {
+        let prefix = self
+            .backup_prefix
+            .to_str()
+            .ok_or_else(|| EhError::invalid("backup_prefix is not valid UTF-8"))?;
+        ehgraph_backup::open_target(prefix, &self.backup, token)
     }
 
     pub fn role(&self) -> Result<Role, EhError> {

@@ -34,6 +34,38 @@ The Service DNS used by a standalone domain's catalog resource is `ehgraph-<doma
 
 ## Backup and restore
 
+`backup_prefix` picks the target:
+
+| `backup_prefix` | Target |
+|---|---|
+| `/var/backups/ehgraph/ehgraph-network` | a directory (a mounted volume) |
+| `gs://noetl-ehgraph/ehgraph-network` | a Google Cloud Storage prefix |
+
+Both targets follow the same rules:
+
+- **Immutable objects** are put-if-absent. These are sealed parts, snapshots, `instance.json` and schema files. On GCS that is an upload with `ifGenerationMatch=0`, so a retried or racing ship never rewrites one.
+- **Per namespace**, the manifest is written after the parts it names, and the head after the manifest.
+- **`checkpoint.json` is written last.** A crash mid-ship leaves the previous checkpoint, and every object it names exists.
+
+A GCS target is configured in `[backup]`:
+
+```toml
+[backup]
+endpoint = "https://storage.googleapis.com"   # override only for an emulator
+auth = "metadata"                             # or "env:VAR", or "none"
+timeout_s = 60
+```
+
+- **`auth = "metadata"`** (the default) uses the GKE metadata server, which is Workload Identity. The pod's Kubernetes service account needs `roles/storage.objectCreator` and `roles/storage.objectViewer` on the bucket. `storage.objects.delete` is not needed: ehgraph never deletes from a backup prefix.
+- **Embedded:** inside noetl-server the graph uses the same pod identity that noetl-server's own `gcp_auth` uses, so there is no second credential. A host can also pass its own token source through `ehgraph::OpenOptions::backup_token`.
+- **Retries:** transient errors (timeouts, 408, 429, 5xx) are retried 4 times with backoff. A 401 or 403 is reported as `UNAUTHORIZED` and names the missing permissions.
+
+**RPO and RTO.**
+
+- **RPO:** the unshipped tail is bounded by `backup_interval_s + seal_max_age_s`. That is 60 s with the example config, and it is the RPO target.
+- **RTO:** the time to list and download the prefix, plus replay on open. The target is 15 minutes for one domain at the planning size of about 10^6 elements. It has not been measured against a real bucket yet (C17).
+- **Alerting:** `deploy/alerts/ehgraph-backup.rules.yaml` alerts on lag (more than 5 times the RPO), on repeated failures (`ehgraph_backup_failures_total`), and on an instance that has never shipped (`ehgraph_backup_last_shipped_timestamp_seconds == 0`).
+
 Ship from inside the running process:
 
 - `backup_interval_s` in the config, or
@@ -48,7 +80,7 @@ ehgraph backup --config /etc/ehgraph/config.toml
 
 The second form takes the data-directory lock, so it fails while the server is up. That is the single-writer rule.
 
-Restore is offline. Empty the volume, then:
+Restore is offline, from either target. It reads and format-checks `checkpoint.json` before it writes anything (E9), and it only reads objects under its own prefix. Empty the volume, then:
 
 ```bash
 ehgraph restore --config /etc/ehgraph/config.toml

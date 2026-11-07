@@ -70,7 +70,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Restore { config } => {
             let cfg = Config::load(&config)?;
-            let checkpoint = ehgraph::restore(&cfg.graph.backup_prefix, &cfg.graph.data_dir)?;
+            let target = cfg.graph.backup_target(None)?;
+            let checkpoint = ehgraph::Backup::new(target).restore(&cfg.graph.data_dir)?;
             println!("{}", serde_json::to_string_pretty(&checkpoint)?);
         }
     }

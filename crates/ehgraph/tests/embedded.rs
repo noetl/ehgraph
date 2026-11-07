@@ -700,3 +700,76 @@ async fn a_second_embedded_primary_for_the_same_instance_or_domain_fails_fast() 
     let reopened = EhGraph::open_embedded_async(same_domain).await.unwrap();
     reopened.shutdown(Duration::from_secs(5)).await;
 }
+
+/// C19: the backup target is config. A bad prefix or `[backup]` section refuses at
+/// open, and a host's token provider is accepted for a `gs://` target without
+/// touching the network (the target is built lazily; open's checkpoint read is best
+/// effort and only logs).
+#[test]
+fn backup_target_is_validated_at_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = config_toml(dir.path(), "");
+    let backup_line = base
+        .lines()
+        .find(|l| l.starts_with("backup_prefix"))
+        .unwrap()
+        .to_string();
+    let text = |prefix: &str, extra: &str| {
+        let text = base.replace(&backup_line, &format!("backup_prefix = \"{prefix}\""));
+        format!("{text}\n{extra}")
+    };
+    let open = |prefix: &str, extra: &str| {
+        GraphConfig::from_toml(&text(prefix, extra)).and_then(EhGraph::open_embedded)
+    };
+
+    let err = open("s3://bucket/p", "").err().unwrap();
+    assert!(err.message.contains("not supported"), "{}", err.message);
+    let err = open("gs://Bad_Bucket/p", "").err().unwrap();
+    assert!(err.message.contains("bucket name"), "{}", err.message);
+    let err = open("gs://b/p", "[backup]\nauth = \"password\"\n")
+        .err()
+        .unwrap();
+    assert!(err.message.contains("[backup] auth"), "{}", err.message);
+    assert!(
+        GraphConfig::from_toml(&format!("{base}\n[backup]\nbucket = \"x\"\n")).is_err(),
+        "unknown [backup] keys are config errors"
+    );
+
+    // A host-supplied provider against an unreachable endpoint: open still
+    // succeeds, and the failed ship is an error, not a hang or a panic.
+    #[derive(Debug)]
+    struct Host;
+    impl ehgraph::TokenProvider for Host {
+        fn bearer(&self) -> Result<Option<String>, ehgraph::EhError> {
+            Ok(Some("host".into()))
+        }
+    }
+    let cfg = GraphConfig::from_toml(&text(
+        "gs://b/p",
+        "[backup]\nendpoint = \"http://127.0.0.1:9\"\nauth = \"none\"\ntimeout_s = 1\n",
+    ))
+    .unwrap();
+    let graph = EhGraph::open_embedded_with(
+        cfg,
+        ehgraph::OpenOptions {
+            backup_token: Some(std::sync::Arc::new(Host)),
+        },
+    )
+    .unwrap();
+    let err = graph.backup_now().unwrap_err();
+    assert!(err.message.contains("gs://b/p"), "{}", err.message);
+    // The failure is visible to alerting, and the never-shipped timestamp is 0.
+    let metrics = graph.metrics_text();
+    let line = |name: &str| {
+        metrics
+            .lines()
+            .find(|l| l.starts_with(name))
+            .unwrap_or_else(|| panic!("no {name} in\n{metrics}"))
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(line("ehgraph_backup_failures_total{"), "1");
+    assert_eq!(line("ehgraph_backup_last_shipped_timestamp_seconds{"), "0");
+}

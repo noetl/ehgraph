@@ -1,0 +1,34 @@
+# Prometheus alerting rules for ehgraph backups (C19, noetl/ehgraph#8).
+# A plain rule-group file: load it into Prometheus, or wrap it in a
+# PrometheusRule for the operator. Nothing applies it automatically.
+#
+# RPO target: backup_interval_s + seal_max_age_s (60 s at the example config).
+# The alerts fire at 5x that, so one slow ship does not page.
+groups:
+  - name: ehgraph-backup
+    rules:
+      - alert: EhgraphBackupLagHigh
+        # Seconds since the last successful ship, while there is unshipped data.
+        expr: max by (instance_id, domain, namespace) (ehgraph_backup_lag_seconds) > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ehgraph {{ $labels.instance_id }} / {{ $labels.namespace }} has not shipped a backup for {{ $value }} s"
+          description: "RPO target is backup_interval_s + seal_max_age_s. Check ehgraph_backup_failures_total and the instance log (\"scheduled backup failed\")."
+      - alert: EhgraphBackupFailing
+        expr: increase(ehgraph_backup_failures_total[15m]) > 2
+        labels:
+          severity: warning
+        annotations:
+          summary: "ehgraph {{ $labels.instance_id }} backup failed {{ $value }} times in 15 m"
+          description: "For a gs:// target: bucket IAM (storage.objects.create/get/list for the pod's Workload Identity), the metadata server, or network. For a directory: the volume."
+      - alert: EhgraphBackupNeverShipped
+        # A live instance with backups configured that has no checkpoint at all.
+        expr: ehgraph_backup_last_shipped_timestamp_seconds == 0 and on (instance_id, domain) ehgraph_info
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ehgraph {{ $labels.instance_id }} has never shipped a backup"
+          description: "Set backup_interval_s, or ship with POST /v1/admin/backup."

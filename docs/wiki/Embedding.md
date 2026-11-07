@@ -93,3 +93,8 @@ A runnable version is in `crates/ehgraph/examples/embed_in_host.rs`.
   makes ehgraph **refuse to open** with a message naming the file, rather than silently
   dropping what it doesn't understand. Roll forward, or restore a backup the older build
   took. Any change to a marked file's shape bumps `STORE_FORMAT`.
+
+  Format 2 is a **compacted** manifest (C02). Each file is written at the lowest format
+  that describes it, so a build before compaction existed can still open a data directory
+  until compaction has actually run on a namespace. Compaction is off by default; turn it
+  on only once rolling back past this release is no longer needed.

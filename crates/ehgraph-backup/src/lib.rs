@@ -206,12 +206,30 @@ impl Backup {
     /// Seal and ship: immutable objects, then manifest and head per namespace, then
     /// the checkpoint.
     pub fn ship(&self, store: &Store, shipped_at_ms: i64) -> Result<Checkpoint, EhError> {
+        self.ship_then(store, shipped_at_ms, |_| ())
+            .map(|(checkpoint, ())| checkpoint)
+    }
+
+    /// [`Backup::ship`], then `after` with the new checkpoint while still holding the
+    /// ship lock. Compaction runs here: it deletes sealed parts, so it must not overlap
+    /// a ship that is still copying them.
+    pub fn ship_then<T>(
+        &self,
+        store: &Store,
+        shipped_at_ms: i64,
+        after: impl FnOnce(&Checkpoint) -> T,
+    ) -> Result<(Checkpoint, T), EhError> {
         let _one = self.shipping.lock().unwrap_or_else(|p| p.into_inner());
-        let result = self.ship_locked(store, shipped_at_ms);
-        if result.is_err() {
-            self.failures.fetch_add(1, Ordering::Relaxed);
+        match self.ship_locked(store, shipped_at_ms) {
+            Ok(checkpoint) => {
+                let extra = after(&checkpoint);
+                Ok((checkpoint, extra))
+            }
+            Err(err) => {
+                self.failures.fetch_add(1, Ordering::Relaxed);
+                Err(err)
+            }
         }
-        result
     }
 
     fn ship_locked(&self, store: &Store, shipped_at_ms: i64) -> Result<Checkpoint, EhError> {

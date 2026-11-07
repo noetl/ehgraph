@@ -106,7 +106,7 @@ fn restore_refuses_a_backup_from_a_newer_format_without_copying() {
     let store = Store::open(StoreConfig::for_tests(dir.path().to_path_buf())).unwrap();
     write(&store, "lab", "device:sw1");
     let checkpoint = ship(&store, backup.path(), 1_000).unwrap();
-    assert_eq!(checkpoint.format, ehgraph_store::format::STORE_FORMAT);
+    assert_eq!(checkpoint.format, ehgraph_store::format::current_format());
     drop(store);
 
     let path = backup.path().join("checkpoint.json");
@@ -124,4 +124,58 @@ fn restore_refuses_a_backup_from_a_newer_format_without_copying() {
         err.message
     );
     assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 0);
+}
+
+/// C02 + C19: a backup prefix never deletes, so after a compaction it still holds the
+/// pre-compaction parts. A restore copies them; open recognises them as folded into
+/// the floor snapshot and removes them instead of adopting them.
+#[test]
+fn restore_after_compaction_equals_the_live_graph() {
+    let dir = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let mut cfg = StoreConfig::for_tests(dir.path().to_path_buf());
+    cfg.seal_max_age = std::time::Duration::ZERO;
+    cfg.idempotency.max_age_ms = 1;
+    let store = Store::open(cfg).unwrap();
+    for i in 0..12 {
+        write(&store, "lab", &format!("device:sw{i}"));
+    }
+    // First ship: every part goes to the prefix.
+    let shipped = ship(&store, backup.path(), 1_000).unwrap();
+    let report = store
+        .compact("lab", shipped.namespaces["lab"].backed_up_version, 2)
+        .unwrap();
+    assert!(report.dropped_parts > 0, "{report:?}");
+    write(&store, "lab", "device:after");
+    ship(&store, backup.path(), 2_000).unwrap();
+    let live = store.graph_at("lab", None).unwrap();
+    drop(store);
+
+    let target = tempfile::tempdir().unwrap();
+    restore(backup.path(), target.path()).unwrap();
+    let restored = Store::open(StoreConfig::for_tests(target.path().to_path_buf())).unwrap();
+    let got = restored.graph_at("lab", None).unwrap();
+    assert_eq!(got.version, live.version);
+    assert_eq!(got.nodes, live.nodes);
+    let summary = restored
+        .summaries()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.namespace == "lab")
+        .unwrap();
+    assert_eq!(summary.floor_version, report.floor_version);
+    let sealed = std::fs::read_dir(target.path().join("namespaces/lab/changelog"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".sealed")
+        })
+        .count() as u64;
+    assert_eq!(
+        sealed, summary.log_parts,
+        "pre-compaction parts were cleared, not adopted"
+    );
 }

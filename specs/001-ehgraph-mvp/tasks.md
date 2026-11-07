@@ -179,6 +179,11 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   `resident_graph_bytes` enforced before logging, embedded budgets derived from the host limit
   and capped at half of it, budget metrics, and no namespace clone per upsert. Tests:
   `resident_bytes.rs` (counting allocator), `resident_budget.rs`, `budgets.rs`, `embedded.rs`.
+- [X] T058 C02 change-log compaction (`noetl/ehgraph#4`): `Store::compact` (shipped +
+  covered + outside the key window), floor snapshot at the floor version, crash-safe order,
+  leftover cleanup on open, `STORE_FORMAT` 2 for compacted manifests only, floor-pinned
+  retention, `NOT_FOUND` below the floor, post-backup hook (`[store] compaction`), log
+  metrics. Tests: `ehgraph-store/tests/compaction.rs`, `roundtrip.rs`, `embedded.rs`.
 - [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
   primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
   leader). Tests in `embedded.rs`.

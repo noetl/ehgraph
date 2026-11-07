@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ehgraph_core::{
     canonical_hash, now_ms, validate_namespace, ChangeBatch, EhError, ErrorCode, FrameBody,
@@ -96,6 +96,39 @@ pub struct NsSummary {
     pub idempotency_keys_evicted: u64,
     /// Estimated resident bytes of the materialized graph (C11).
     pub graph_bytes: u64,
+    /// Change log on disk: sealed parts listed in the manifest, and their bytes plus
+    /// the active part's (C02).
+    pub log_parts: u64,
+    pub log_bytes: u64,
+    /// Compaction floor; `0` when never compacted.
+    pub floor_version: u64,
+    /// How long the last open took to rebuild this namespace.
+    pub replay_ms: u64,
+}
+
+/// What one [`Store::compact`] call did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompactionReport {
+    pub namespace: String,
+    /// Sealed parts removed from the log.
+    pub dropped_parts: u64,
+    pub dropped_bytes: u64,
+    /// The floor after this call (unchanged when nothing was dropped).
+    pub floor_version: u64,
+    /// The full snapshot the floor rests on, if one was created or chosen.
+    pub floor_snapshot: Option<String>,
+    /// Why nothing was dropped, when nothing was.
+    pub skipped: Option<String>,
+}
+
+/// Where a test makes [`Store::testing_compact_crash`] stop, simulating a crash.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactCrash {
+    /// After the floor snapshot is written, before the new manifest.
+    BeforeManifest,
+    /// After the new manifest is durable, before the old parts are deleted.
+    AfterManifest,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,6 +202,12 @@ struct Namespace {
     active_opened_ms: i64,
     next_seq: u64,
     last_write_ms: i64,
+    /// How long the last open took to rebuild this namespace (C02 metric).
+    replay_ms: u64,
+    /// Per sealed part, by seq: its highest commit `ts_ms`, and whether it records any
+    /// idempotency key. Parts are immutable, so this is filled lazily by compaction
+    /// and never invalidated.
+    part_max_ts: HashMap<u64, (i64, bool)>,
 }
 
 // ⚠ Every struct below is read back from disk. `deny_unknown_fields` plus the
@@ -183,6 +222,17 @@ struct Manifest {
     namespace: String,
     parts: Vec<PartMeta>,
     snapshots: Vec<SnapshotMeta>,
+    /// Compaction floor (C02, format 2): every version at or below this was folded
+    /// into `floor_snapshot` and its sealed parts were removed. `0` = never compacted.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    floor_version: u64,
+    /// The full snapshot the floor rests on. Pinned: retention never removes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    floor_snapshot: Option<String>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,6 +405,10 @@ impl Store {
                 idempotency_key_bytes: ns.keys.bytes(),
                 idempotency_keys_evicted: ns.keys.evicted(),
                 graph_bytes: ns.graph_bytes,
+                log_parts: ns.manifest.parts.len() as u64,
+                log_bytes: ns.manifest.parts.iter().map(|p| p.bytes).sum::<u64>() + ns.active_bytes,
+                floor_version: ns.manifest.floor_version,
+                replay_ms: ns.replay_ms,
             })
             .collect())
     }
@@ -397,6 +451,21 @@ impl Store {
         if version == ns.head {
             return Ok(ns.graph.clone());
         }
+        // Below the compaction floor only a retained full snapshot's exact version
+        // can be read; the frames in between are gone (C02).
+        if version < ns.manifest.floor_version
+            && !ns
+                .manifest
+                .snapshots
+                .iter()
+                .any(|snap| snap.full && snap.graph_version == version)
+        {
+            return Err(EhError::not_found(format!(
+                "version {version} of {namespace} is below the compaction floor {}; only \
+                 retained full snapshots remain there",
+                ns.manifest.floor_version
+            )));
+        }
         materialize_to(&self.cfg, namespace, &ns.manifest, version)
     }
 
@@ -409,31 +478,10 @@ impl Store {
         if let Scope::Snapshot { snapshot_id } = scope {
             return snapshot_by_id(namespace, ns, snapshot_id);
         }
-        let scoped = ns.graph.apply_scope(scope)?;
-        let snapshot_id = format!("snap-{}-{}", ns.head, ns.manifest.version + 1);
-        let node_bytes = batches_to_ipc(&nodes_to_batch(&scoped.node_list())?)?;
-        let edge_bytes = batches_to_ipc(&edges_to_batch(&scoped.edge_list())?)?;
-        let dir = ns_dir(&self.cfg, namespace)
-            .join("snapshots")
-            .join(&snapshot_id);
-        atomic_write(&dir.join("nodes.arrow"), &node_bytes)?;
-        atomic_write(&dir.join("edges.arrow"), &edge_bytes)?;
-        let full = matches!(scope, Scope::Full);
-        let info = SnapshotMeta {
-            snapshot_id: snapshot_id.clone(),
-            graph_version: ns.head,
-            scope: scope.clone(),
-            nodes: scoped.nodes.len() as u64,
-            edges: scoped.edges.len() as u64,
-            bytes: (node_bytes.len() + edge_bytes.len()) as u64,
-            created_at_ms: now_ms(),
-            full,
-        };
-        atomic_write(&dir.join("meta.json"), &serde_json::to_vec_pretty(&info)?)?;
-        ns.manifest.snapshots.push(info.clone());
-        ns.manifest.version += 1;
-        retain_snapshots(&self.cfg, namespace, &mut ns.manifest)?;
+        let info = write_snapshot(&self.cfg, namespace, ns, scope)?;
+        let retired = retain_snapshots(&self.cfg, namespace, &mut ns.manifest);
         write_manifest(&self.cfg, namespace, &ns.manifest)?;
+        remove_dirs(retired);
         let _ = write_head_file(&self.cfg, namespace, ns);
         Ok(to_info(namespace, &info))
     }
@@ -728,6 +776,176 @@ impl Store {
         })
     }
 
+    /// Fold sealed change-log parts into a full snapshot and remove them (C02).
+    ///
+    /// A prefix of sealed parts (by seq) is dropped only when **every** part in it:
+    ///
+    /// 1. is covered by a full snapshot (one is written at head if none covers it);
+    /// 2. has been shipped: `last_version <= shipped_version`, the backup
+    ///    checkpoint's `backed_up_version`. Never-shipped parts stay;
+    /// 3. records no idempotency key, or is older than the idempotency window: its
+    ///    keys have all been forgotten already (C23), so replaying without it
+    ///    rebuilds the same key window.
+    ///
+    /// and the prefix has at least `min_parts` parts. Crash safety: the snapshot is
+    /// durable first, then the new manifest (with the floor), and only then are the
+    /// part files deleted. A crash before the manifest leaves the old log in force; a
+    /// crash after it leaves files that the next open removes. Open replays from the
+    /// floor snapshot plus the remaining tail.
+    pub fn compact(
+        &self,
+        namespace: &str,
+        shipped_version: u64,
+        min_parts: usize,
+    ) -> Result<CompactionReport, EhError> {
+        self.compact_inner(namespace, shipped_version, min_parts, None)
+    }
+
+    #[doc(hidden)]
+    pub fn testing_compact_crash(
+        &self,
+        namespace: &str,
+        shipped_version: u64,
+        min_parts: usize,
+        crash: CompactCrash,
+    ) -> Result<CompactionReport, EhError> {
+        self.compact_inner(namespace, shipped_version, min_parts, Some(crash))
+    }
+
+    fn compact_inner(
+        &self,
+        namespace: &str,
+        shipped_version: u64,
+        min_parts: usize,
+        crash: Option<CompactCrash>,
+    ) -> Result<CompactionReport, EhError> {
+        let mut inner = self.lock()?;
+        let ns = inner
+            .namespaces
+            .get_mut(namespace)
+            .ok_or_else(|| EhError::not_found(format!("namespace {namespace} not found")))?;
+        let mut report = CompactionReport {
+            namespace: namespace.to_string(),
+            dropped_parts: 0,
+            dropped_bytes: 0,
+            floor_version: ns.manifest.floor_version,
+            floor_snapshot: ns.manifest.floor_snapshot.clone(),
+            skipped: None,
+        };
+        let skip = |mut report: CompactionReport, why: String| {
+            report.skipped = Some(why);
+            Ok(report)
+        };
+        // A key recorded at log clock `c` is forgotten once the clock passes
+        // `c + max_age`. A part whose frames all precede `key_floor` holds only
+        // forgotten keys.
+        let key_floor = match ns.keys.clock_ms() {
+            Some(clock) => clock.saturating_sub(self.cfg.idempotency.max_age_ms),
+            None => i64::MAX,
+        };
+        let mut parts = ns.manifest.parts.clone();
+        parts.sort_by_key(|part| part.seq);
+        let mut clock = i64::MIN;
+        let mut candidates = Vec::new();
+        for part in &parts {
+            if part.last_version > shipped_version || part.last_version > ns.head {
+                break;
+            }
+            let (max_ts, has_keys) = match ns.part_max_ts.get(&part.seq) {
+                Some(info) => *info,
+                None => {
+                    let info = part_key_info(&self.cfg, namespace, part)?;
+                    ns.part_max_ts.insert(part.seq, info);
+                    info
+                }
+            };
+            clock = clock.max(max_ts);
+            // A part with no keys cannot change the key window, whatever its age.
+            if has_keys && clock >= key_floor {
+                break;
+            }
+            candidates.push(part.clone());
+        }
+        if candidates.len() < min_parts.max(1) {
+            let why = format!(
+                "{} of {} sealed parts are compactable (shipped to {shipped_version}, outside \
+                 the idempotency window); need {}",
+                candidates.len(),
+                parts.len(),
+                min_parts.max(1)
+            );
+            return skip(report, why);
+        }
+        let new_floor = candidates.iter().map(|p| p.last_version).max().unwrap_or(0);
+
+        // 1. A durable full snapshot exactly at the floor, so every version at or
+        //    above the floor stays readable. Materialized from the log while all of
+        //    it is still there (a transient second copy of the graph).
+        let existing = ns
+            .manifest
+            .snapshots
+            .iter()
+            .find(|snap| snap.full && snap.graph_version == new_floor)
+            .map(|snap| snap.snapshot_id.clone());
+        let snapshot_id = match existing {
+            Some(id) => id,
+            None if new_floor == ns.head => {
+                write_snapshot(&self.cfg, namespace, ns, &Scope::Full)?.snapshot_id
+            }
+            None => {
+                let at_floor = materialize_to(&self.cfg, namespace, &ns.manifest, new_floor)?;
+                write_snapshot_of(
+                    &self.cfg,
+                    namespace,
+                    &mut ns.manifest,
+                    &at_floor,
+                    &Scope::Full,
+                )?
+                .snapshot_id
+            }
+        };
+        if crash == Some(CompactCrash::BeforeManifest) {
+            return Ok(report);
+        }
+
+        // 2. The new manifest: parts gone, floor raised, floor snapshot pinned.
+        let dropped: Vec<u64> = candidates.iter().map(|p| p.seq).collect();
+        ns.manifest
+            .parts
+            .retain(|part| !dropped.contains(&part.seq));
+        ns.manifest.floor_version = ns.manifest.floor_version.max(new_floor);
+        ns.manifest.floor_snapshot = Some(snapshot_id.clone());
+        ns.manifest.version += 1;
+        let retired = retain_snapshots(&self.cfg, namespace, &mut ns.manifest);
+        write_manifest(&self.cfg, namespace, &ns.manifest)?;
+        write_head_file(&self.cfg, namespace, ns)?;
+        if crash == Some(CompactCrash::AfterManifest) {
+            return Ok(report);
+        }
+
+        // 3. Only now remove the folded parts.
+        let dir = ns_dir(&self.cfg, namespace);
+        for part in &candidates {
+            fs::remove_file(dir.join(&part.file))?;
+            ns.part_max_ts.remove(&part.seq);
+            report.dropped_parts += 1;
+            report.dropped_bytes += part.bytes;
+        }
+        fsync_dir(&dir.join("changelog"))?;
+        remove_dirs(retired);
+        report.floor_version = ns.manifest.floor_version;
+        report.floor_snapshot = Some(snapshot_id);
+        tracing::info!(
+            instance_id = %self.cfg.instance_id,
+            namespace,
+            dropped_parts = report.dropped_parts,
+            dropped_bytes = report.dropped_bytes,
+            floor_version = report.floor_version,
+            "compacted change log"
+        );
+        Ok(report)
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, EhError> {
         self.inner
             .lock()
@@ -831,9 +1049,12 @@ fn load_namespaces(cfg: &StoreConfig) -> Result<BTreeMap<String, Namespace>, EhE
 }
 
 fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, EhError> {
+    let started = Instant::now();
     let mut manifest = read_manifest(cfg, namespace)?;
     adopt_unlisted_parts(cfg, namespace, &mut manifest)?;
     let frames = read_frames(cfg, namespace, &manifest)?;
+    // After compaction the log may hold nothing at or below the floor, so the floor
+    // itself is a version the namespace is known to have reached.
     let log_version = frames
         .iter()
         .filter_map(|frame| match frame {
@@ -841,7 +1062,8 @@ fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, Eh
             FrameBody::Idempotency(_) => None,
         })
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .max(manifest.floor_version);
     let mut graph = MaterializedGraph::default();
     let mut keys = KeyWindow::new(cfg.idempotency);
     let base = manifest
@@ -850,6 +1072,18 @@ fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, Eh
         .filter(|snap| snap.full && snap.graph_version <= log_version)
         .max_by_key(|snap| snap.graph_version)
         .cloned();
+    if manifest.floor_version > 0 {
+        let covered = base
+            .as_ref()
+            .is_some_and(|snap| snap.graph_version >= manifest.floor_version);
+        if !covered {
+            return Err(EhError::unavailable(format!(
+                "namespace {namespace} is compacted to version {} but no full snapshot at or \
+                 above it is present (floor snapshot {:?}); restore from backup",
+                manifest.floor_version, manifest.floor_snapshot
+            )));
+        }
+    }
     if let Some(snap) = &base {
         graph = load_snapshot_graph(cfg, namespace, snap)?;
     }
@@ -886,6 +1120,7 @@ fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, Eh
         .max()
         .unwrap_or(0);
     let graph_bytes = graph_resident_bytes(&graph);
+    let replay_ms = started.elapsed().as_millis() as u64;
     let ns = Namespace {
         head: log_version,
         sealed_version,
@@ -898,6 +1133,8 @@ fn recover_namespace(cfg: &StoreConfig, namespace: &str) -> Result<Namespace, Eh
         active_opened_ms,
         next_seq,
         last_write_ms,
+        replay_ms,
+        part_max_ts: HashMap::new(),
     };
     if recorded_version != Some(log_version) {
         tracing::warn!(
@@ -945,6 +1182,24 @@ fn adopt_unlisted_parts(
             )));
         }
         let seq = parse_part_seq(&name).unwrap_or(manifest.parts.len() as u64 + 1);
+        let max_version = scan
+            .frames
+            .iter()
+            .map(|frame| match frame {
+                FrameBody::Commit(batch) => batch.graph_version,
+                FrameBody::Idempotency(note) => note.graph_version,
+            })
+            .max()
+            .unwrap_or(0);
+        if manifest.floor_version > 0 && max_version <= manifest.floor_version {
+            // Left behind by a compaction that crashed after its manifest was durable,
+            // or restored from a backup prefix that still holds pre-compaction parts.
+            // Everything in it is folded into the floor snapshot.
+            fs::remove_file(&path)?;
+            fsync_dir(&dir)?;
+            tracing::info!(namespace, %name, floor = manifest.floor_version, "removed a compacted part left on disk");
+            continue;
+        }
         let versions: Vec<u64> = scan
             .frames
             .iter()
@@ -1120,6 +1375,8 @@ fn ensure_namespace<'a>(
             namespace: namespace.to_string(),
             parts: Vec::new(),
             snapshots: Vec::new(),
+            floor_version: 0,
+            floor_snapshot: None,
         };
         write_manifest(cfg, namespace, &manifest)?;
         let active = dir.join("changelog").join("active.part");
@@ -1145,6 +1402,8 @@ fn ensure_namespace<'a>(
             active_opened_ms: opened,
             next_seq: 1,
             last_write_ms: 0,
+            replay_ms: 0,
+            part_max_ts: HashMap::new(),
         };
         write_head_file(cfg, namespace, &ns)?;
         inner.namespaces.insert(namespace.to_string(), ns);
@@ -1247,20 +1506,78 @@ fn append_raw(
     Ok(())
 }
 
-fn retain_snapshots(
+/// Drop the oldest snapshots beyond `snapshot_keep` from the manifest, never the
+/// compaction floor's. Returns their directories, for the caller to delete **after**
+/// the new manifest is durable (so a crash never leaves a manifest naming a deleted
+/// snapshot).
+fn retain_snapshots(cfg: &StoreConfig, namespace: &str, manifest: &mut Manifest) -> Vec<PathBuf> {
+    let keep = cfg.snapshot_keep.max(1);
+    let mut removed = Vec::new();
+    while manifest.snapshots.len() > keep {
+        let Some(index) = manifest
+            .snapshots
+            .iter()
+            .position(|snap| Some(&snap.snapshot_id) != manifest.floor_snapshot.as_ref())
+        else {
+            break;
+        };
+        let snap = manifest.snapshots.remove(index);
+        removed.push(
+            ns_dir(cfg, namespace)
+                .join("snapshots")
+                .join(&snap.snapshot_id),
+        );
+    }
+    removed
+}
+
+fn remove_dirs(dirs: Vec<PathBuf>) {
+    for dir in dirs {
+        if let Err(err) = fs::remove_dir_all(&dir) {
+            tracing::warn!(dir = %dir.display(), %err, "could not remove a retired snapshot");
+        }
+    }
+}
+
+/// Write a snapshot of `ns` at its head and add it to the manifest (not yet written).
+fn write_snapshot(
+    cfg: &StoreConfig,
+    namespace: &str,
+    ns: &mut Namespace,
+    scope: &Scope,
+) -> Result<SnapshotMeta, EhError> {
+    write_snapshot_of(cfg, namespace, &mut ns.manifest, &ns.graph, scope)
+}
+
+/// Write a snapshot of `graph` (at `graph.version`) and add it to `manifest`.
+fn write_snapshot_of(
     cfg: &StoreConfig,
     namespace: &str,
     manifest: &mut Manifest,
-) -> Result<(), EhError> {
-    let keep = cfg.snapshot_keep.max(1);
-    while manifest.snapshots.len() > keep {
-        let removed = manifest.snapshots.remove(0);
-        let dir = ns_dir(cfg, namespace)
-            .join("snapshots")
-            .join(&removed.snapshot_id);
-        fs::remove_dir_all(&dir).ok();
-    }
-    Ok(())
+    graph: &MaterializedGraph,
+    scope: &Scope,
+) -> Result<SnapshotMeta, EhError> {
+    let scoped = graph.apply_scope(scope)?;
+    let snapshot_id = format!("snap-{}-{}", graph.version, manifest.version + 1);
+    let node_bytes = batches_to_ipc(&nodes_to_batch(&scoped.node_list())?)?;
+    let edge_bytes = batches_to_ipc(&edges_to_batch(&scoped.edge_list())?)?;
+    let dir = ns_dir(cfg, namespace).join("snapshots").join(&snapshot_id);
+    atomic_write(&dir.join("nodes.arrow"), &node_bytes)?;
+    atomic_write(&dir.join("edges.arrow"), &edge_bytes)?;
+    let info = SnapshotMeta {
+        snapshot_id,
+        graph_version: graph.version,
+        scope: scope.clone(),
+        nodes: scoped.nodes.len() as u64,
+        edges: scoped.edges.len() as u64,
+        bytes: (node_bytes.len() + edge_bytes.len()) as u64,
+        created_at_ms: now_ms(),
+        full: matches!(scope, Scope::Full),
+    };
+    atomic_write(&dir.join("meta.json"), &serde_json::to_vec_pretty(&info)?)?;
+    manifest.snapshots.push(info.clone());
+    manifest.version += 1;
+    Ok(info)
 }
 
 fn snapshot_by_id(
@@ -1310,15 +1627,25 @@ fn read_manifest(cfg: &StoreConfig, namespace: &str) -> Result<Manifest, EhError
             namespace: namespace.to_string(),
             parts: Vec::new(),
             snapshots: Vec::new(),
+            floor_version: 0,
+            floor_snapshot: None,
         });
     }
     decode_marked(&fs::read(&path)?, &path)
 }
 
 fn write_manifest(cfg: &StoreConfig, namespace: &str, manifest: &Manifest) -> Result<(), EhError> {
+    // The lowest format that describes it: only a compacted manifest is format 2, so
+    // an older build can open the directory until compaction has run (E9).
+    let mut out = manifest.clone();
+    out.format = if out.floor_version > 0 {
+        crate::format::COMPACTED_MANIFEST_FORMAT
+    } else {
+        current_format()
+    };
     atomic_write(
         &ns_dir(cfg, namespace).join("manifest.json"),
-        &serde_json::to_vec_pretty(manifest)?,
+        &serde_json::to_vec_pretty(&out)?,
     )
 }
 
@@ -1417,4 +1744,27 @@ fn graph_bytes_delta(graph: Option<&MaterializedGraph>, ops: &[StoredOp]) -> i64
         }
     }
     delta
+}
+
+/// One sealed part's highest commit `ts_ms` (`i64::MIN` when it has no commit), and
+/// whether any of its frames records an idempotency key.
+fn part_key_info(
+    cfg: &StoreConfig,
+    namespace: &str,
+    part: &PartMeta,
+) -> Result<(i64, bool), EhError> {
+    let bytes = fs::read(ns_dir(cfg, namespace).join(&part.file))?;
+    let scan = decode_part(&bytes)?;
+    let mut max_ts = i64::MIN;
+    let mut has_keys = false;
+    for frame in &scan.frames {
+        match frame {
+            FrameBody::Commit(batch) => {
+                max_ts = max_ts.max(batch.ts_ms);
+                has_keys |= batch.idempotency_key.is_some();
+            }
+            FrameBody::Idempotency(_) => has_keys = true,
+        }
+    }
+    Ok((max_ts, has_keys))
 }

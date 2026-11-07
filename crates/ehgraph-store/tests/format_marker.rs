@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ehgraph_core::{ErrorCode, NodeInput, WriteRequest};
-use ehgraph_store::format::STORE_FORMAT;
+use ehgraph_store::format::{current_format, STORE_FORMAT};
 use ehgraph_store::{Store, StoreConfig};
 use serde_json::Value;
 
@@ -92,14 +92,14 @@ fn refused(dir: &Path) -> ehgraph_core::EhError {
 }
 
 #[test]
-fn every_file_this_build_writes_carries_the_current_format() {
+fn every_file_this_build_writes_carries_a_format_marker() {
     let dir = tempfile::tempdir().unwrap();
     write_one(dir.path());
     for path in [manifest(dir.path()), head(dir.path()), instance(dir.path())] {
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             value["format"],
-            Value::from(STORE_FORMAT),
+            Value::from(current_format()),
             "{} has no current format marker",
             path.display()
         );

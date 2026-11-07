@@ -78,6 +78,10 @@ pub fn render(engine: &Engine, mode: &str) -> String {
         out.push_str("# TYPE ehgraph_backup_lag_versions gauge\n");
         out.push_str("# TYPE ehgraph_backup_lag_seconds gauge\n");
         out.push_str("# TYPE ehgraph_resident_graph_bytes gauge\n");
+        out.push_str("# TYPE ehgraph_log_parts gauge\n");
+        out.push_str("# TYPE ehgraph_log_bytes gauge\n");
+        out.push_str("# TYPE ehgraph_log_floor_version gauge\n");
+        out.push_str("# TYPE ehgraph_open_replay_seconds gauge\n");
         out.push_str("# TYPE ehgraph_idempotency_keys gauge\n");
         out.push_str("# TYPE ehgraph_idempotency_key_bytes gauge\n");
         out.push_str("# TYPE ehgraph_idempotency_keys_evicted counter\n");
@@ -97,6 +101,22 @@ pub fn render(engine: &Engine, mode: &str) -> String {
             out.push_str(&format!(
                 "ehgraph_backup_lag_seconds{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {lag_seconds}\n"
             ));
+            for (name, value) in [
+                ("ehgraph_log_parts", summary.log_parts.to_string()),
+                ("ehgraph_log_bytes", summary.log_bytes.to_string()),
+                (
+                    "ehgraph_log_floor_version",
+                    summary.floor_version.to_string(),
+                ),
+                (
+                    "ehgraph_open_replay_seconds",
+                    format!("{:.3}", summary.replay_ms as f64 / 1000.0),
+                ),
+            ] {
+                out.push_str(&format!(
+                    "{name}{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {value}\n"
+                ));
+            }
             out.push_str(&format!(
                 "ehgraph_resident_graph_bytes{{instance_id=\"{instance}\",domain=\"{domain}\",namespace=\"{ns}\"}} {}\n",
                 summary.graph_bytes

@@ -138,6 +138,18 @@ pub struct StoreSection {
     /// At most this many idempotency keys per namespace, oldest forgotten first.
     #[serde(default = "default_idempotency_max_keys")]
     pub idempotency_max_keys: u64,
+    /// Fold shipped, sealed change-log parts into a full snapshot after each
+    /// successful backup (C02). Off by default. Turning it on makes compacted
+    /// manifests format 2, which older builds refuse (E9).
+    #[serde(default)]
+    pub compaction: bool,
+    /// Compact only when at least this many parts can go.
+    #[serde(default = "default_compact_min_parts")]
+    pub compact_min_parts: usize,
+}
+
+fn default_compact_min_parts() -> usize {
+    8
 }
 
 fn default_idempotency_window() -> u64 {
@@ -192,6 +204,8 @@ impl Default for StoreSection {
             snapshot_keep: default_keep(),
             idempotency_window_s: default_idempotency_window(),
             idempotency_max_keys: default_idempotency_max_keys(),
+            compaction: false,
+            compact_min_parts: default_compact_min_parts(),
         }
     }
 }

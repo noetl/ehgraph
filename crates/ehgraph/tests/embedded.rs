@@ -816,3 +816,59 @@ fn embedded_budgets_are_sized_from_the_host_and_refuse_when_too_big() {
     // Unknown keys in [budgets] are config errors, not silently ignored.
     assert!(GraphConfig::from_toml(&format!("{base}\n[budgets]\nglobal = 1\n")).is_err());
 }
+
+/// C02: with `[store] compaction = true`, a successful backup folds the shipped parts
+/// into a floor snapshot, the metrics report it, and a reopen serves the same graph.
+#[test]
+fn compaction_runs_after_a_backup_when_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!(
+        "{}\n[store]\nseal_max_age_s = 0\ncompaction = true\ncompact_min_parts = 2\n",
+        config_toml(dir.path(), "")
+    );
+    let open = || EhGraph::open_embedded(GraphConfig::from_toml(&text).unwrap()).unwrap();
+    let graph = open();
+    let writer = graph.client("lab-writer").unwrap();
+    for i in 0..6 {
+        let wrote = writer.call(
+            "graph.upsert",
+            &json!({
+                "namespace": "lab",
+                "source": "compaction",
+                "execution_id": "e",
+                "ts_ms": 1_000 + i,
+                "nodes": [{"id": format!("device:{i}"), "type": "Device"}],
+            }),
+        );
+        assert!(wrote.ok, "{wrote:?}");
+    }
+    graph.backup_now().unwrap();
+    let metric = |text: &str, name: &str| -> String {
+        text.lines()
+            .find(|l| l.starts_with(name) && l.contains("namespace=\"lab\""))
+            .unwrap_or_else(|| panic!("no {name}"))
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let metrics = graph.metrics_text();
+    let floor: u64 = metric(&metrics, "ehgraph_log_floor_version{")
+        .parse()
+        .unwrap();
+    assert!(floor > 0, "{metrics}");
+    let parts: u64 = metric(&metrics, "ehgraph_log_parts{").parse().unwrap();
+    assert!(parts < 6, "{metrics}");
+    let node = writer.call("graph.node", &json!({"namespace": "lab", "id": "device:0"}));
+    assert!(node.ok, "{node:?}");
+    drop(writer);
+    drop(graph);
+
+    let reopened = open();
+    let node = reopened
+        .client("lab-writer")
+        .unwrap()
+        .call("graph.node", &json!({"namespace": "lab", "id": "device:5"}));
+    assert!(node.ok, "{node:?}");
+    assert_eq!(node.graph_version, Some(6));
+}

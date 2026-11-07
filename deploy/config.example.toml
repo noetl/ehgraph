@@ -36,6 +36,10 @@ snapshot_keep = 16
 # Idempotency keys: remembered this long on the log clock, and at most this many per namespace.
 idempotency_window_s = 86400
 idempotency_max_keys = 100000
+# Fold shipped sealed parts into a floor snapshot after each backup (C02). Off by default;
+# a compacted manifest is format 2, which builds before this one refuse (E9).
+compaction = false
+compact_min_parts = 8
 
 [auth]
 mode = "bearer"

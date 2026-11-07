@@ -369,7 +369,16 @@ impl EhGraph {
     /// calls this.
     pub fn backup_now(&self) -> Result<Checkpoint, EhError> {
         let engine = self.engine()?;
-        engine.backup.ship(&engine.store, ehgraph_core::now_ms())
+        let store_cfg = &self.shared.config.store;
+        let (checkpoint, ()) =
+            engine
+                .backup
+                .ship_then(&engine.store, ehgraph_core::now_ms(), |checkpoint| {
+                    if store_cfg.compaction {
+                        compact_shipped(&engine.store, checkpoint, store_cfg.compact_min_parts);
+                    }
+                })?;
+        Ok(checkpoint)
     }
 
     /// Expire idle and over-lifetime sessions now.
@@ -476,6 +485,23 @@ impl EhGraph {
         ShutdownReport {
             lock_released,
             tasks_stopped,
+        }
+    }
+}
+
+/// Compact every namespace up to what `checkpoint` shipped (C02). Failures are
+/// logged: the backup itself succeeded, and compaction retries on the next one.
+fn compact_shipped(store: &Store, checkpoint: &Checkpoint, min_parts: usize) {
+    for (namespace, shipped) in &checkpoint.namespaces {
+        match store.compact(namespace, shipped.backed_up_version, min_parts) {
+            Ok(report) if report.dropped_parts > 0 => tracing::info!(
+                namespace,
+                dropped_parts = report.dropped_parts,
+                floor_version = report.floor_version,
+                "compaction after backup"
+            ),
+            Ok(_) => {}
+            Err(err) => tracing::error!(namespace, %err, "compaction after backup failed"),
         }
     }
 }

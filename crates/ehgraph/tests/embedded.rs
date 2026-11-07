@@ -872,3 +872,62 @@ fn compaction_runs_after_a_backup_when_enabled() {
     assert!(node.ok, "{node:?}");
     assert_eq!(node.graph_version, Some(6));
 }
+
+/// C17: sessionless reads at head use a cached view and a direct point read. Neither
+/// may serve a stale graph after a write, and the point read keeps its semantics
+/// (an inactive node is still returned, with `active: false`).
+#[test]
+fn cached_head_reads_follow_every_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = EhGraph::open_embedded(config(dir.path())).unwrap();
+    let w = graph.client("lab-writer").unwrap();
+    let upsert = |nodes: Value, edges: Value| {
+        let r = w.call(
+            "graph.upsert",
+            &json!({"namespace": "lab", "source": "s", "execution_id": "e", "nodes": nodes, "edges": edges}),
+        );
+        assert!(r.ok, "{r:?}");
+        r.graph_version.unwrap()
+    };
+    upsert(
+        json!([{"id": "n:a", "type": "Device"}, {"id": "n:b", "type": "Device"}, {"id": "n:c", "type": "Device"}]),
+        json!([{"src": "n:a", "dst": "n:b", "type": "LINK"}]),
+    );
+    let neighbors = |id: &str| {
+        let r = w.call(
+            "graph.neighbors",
+            &json!({"namespace": "lab", "node_id": id, "direction": "out", "limit": 10}),
+        );
+        assert!(r.ok, "{r:?}");
+        (r.graph_version.unwrap(), r.data.unwrap().to_string())
+    };
+    let (v1, first) = neighbors("n:a");
+    assert!(first.contains("n:b") && !first.contains("n:c"), "{first}");
+    // Warm cache, then a write: the next read must see it at the new version.
+    let v2 = upsert(
+        json!([]),
+        json!([{"src": "n:a", "dst": "n:c", "type": "LINK"}]),
+    );
+    let (seen, second) = neighbors("n:a");
+    assert_eq!(seen, v2);
+    assert!(v2 > v1 && second.contains("n:c"), "{second}");
+
+    // Direct point read: same answer as before the fast path, inactive included.
+    let r = w.call(
+        "graph.deactivate",
+        &json!({"namespace": "lab", "ids": ["n:b"], "execution_id": "e"}),
+    );
+    assert!(r.ok, "{r:?}");
+    let node = w.call("graph.node", &json!({"namespace": "lab", "id": "n:b"}));
+    assert!(node.ok, "{node:?}");
+    assert_eq!(node.data.as_ref().unwrap()["active"], false);
+    assert_eq!(node.graph_version, r.graph_version);
+    let missing = w.call("graph.node", &json!({"namespace": "lab", "id": "n:zz"}));
+    assert_eq!(code(&missing), Some(ErrorCode::NotFound));
+    // A pinned older version still goes through a full view of that version.
+    let old = w.call(
+        "graph.node",
+        &json!({"namespace": "lab", "id": "n:b", "version": v1}),
+    );
+    assert_eq!(old.data.as_ref().unwrap()["active"], true);
+}

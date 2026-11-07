@@ -464,38 +464,86 @@ pub fn plan_upsert(
     if request.source.is_empty() || request.execution_id.is_empty() {
         return Err(EhError::invalid("source and execution_id are required"));
     }
-    let mut scratch = graph.clone();
+    // Plan against the live graph plus this batch's own images, so later inputs see
+    // earlier ones. Cloning the whole graph here made every write O(namespace) (C17).
+    let mut scratch = Overlay::new(graph);
     let mut ops = Vec::new();
     for input in &request.nodes {
         if let Some(op) = plan_node(&scratch, input, request, schema)? {
-            scratch.apply_op(&op, scratch.version)?;
+            scratch.apply(&op);
             ops.push(op);
         }
     }
     for input in &request.edges {
         if let Some(op) = plan_edge(&scratch, input, request, schema)? {
-            scratch.apply_op(&op, scratch.version)?;
+            scratch.apply(&op);
             ops.push(op);
         }
     }
     Ok(ops)
 }
 
+/// A batch's planned images over the live graph, read-through.
+struct Overlay<'a> {
+    base: &'a MaterializedGraph,
+    nodes: HashMap<String, Node>,
+    edges: HashMap<String, Edge>,
+}
+
+impl<'a> Overlay<'a> {
+    fn new(base: &'a MaterializedGraph) -> Self {
+        Self {
+            base,
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
+        }
+    }
+
+    fn node(&self, id: &str) -> Option<&Node> {
+        self.nodes.get(id).or_else(|| self.base.nodes.get(id))
+    }
+
+    fn edge(&self, id: &str) -> Option<&Edge> {
+        self.edges.get(id).or_else(|| self.base.edges.get(id))
+    }
+
+    fn has_node(&self, id: &str) -> bool {
+        self.node(id).is_some()
+    }
+
+    fn has_edge(&self, id: &str) -> bool {
+        self.edge(id).is_some()
+    }
+
+    fn apply(&mut self, op: &StoredOp) {
+        match op {
+            StoredOp::UpsertNode { node } => {
+                self.nodes.insert(node.id.clone(), node.clone());
+            }
+            StoredOp::UpsertEdge { edge } => {
+                self.edges.insert(edge.id.clone(), edge.clone());
+            }
+            // Planning an upsert never produces a deactivation.
+            StoredOp::DeactivateNode { .. } | StoredOp::DeactivateEdge { .. } => {}
+        }
+    }
+}
+
 fn plan_node(
-    graph: &MaterializedGraph,
+    graph: &Overlay<'_>,
     input: &NodeInput,
     request: &WriteRequest,
     schema: &SchemaConfig,
 ) -> Result<Option<StoredOp>, EhError> {
     input.validate()?;
     schema.check_node(input)?;
-    if graph.edges.contains_key(&input.id) {
+    if graph.has_edge(&input.id) {
         return Err(EhError::invalid(format!(
             "node id {} is already an edge id",
             input.id
         )));
     }
-    let candidate = match graph.nodes.get(&input.id) {
+    let candidate = match graph.node(&input.id) {
         Some(existing) => {
             let content_changed = existing.type_name != input.type_name
                 || existing.props != input.props
@@ -541,7 +589,7 @@ fn plan_node(
             }
         }
     };
-    if let Some(existing) = graph.nodes.get(&input.id) {
+    if let Some(existing) = graph.node(&input.id) {
         if same_node_content(existing, &candidate) {
             return Ok(None);
         }
@@ -550,7 +598,7 @@ fn plan_node(
 }
 
 fn plan_edge(
-    graph: &MaterializedGraph,
+    graph: &Overlay<'_>,
     input: &EdgeInput,
     request: &WriteRequest,
     schema: &SchemaConfig,
@@ -568,12 +616,12 @@ fn plan_edge(
             input.origin.as_deref(),
         ),
     };
-    if graph.nodes.contains_key(&id) {
+    if graph.has_node(&id) {
         return Err(EhError::invalid(format!(
             "edge id {id} is already a node id"
         )));
     }
-    let candidate = match graph.edges.get(&id) {
+    let candidate = match graph.edge(&id) {
         Some(existing) => {
             let content_changed = existing.src != input.src
                 || existing.dst != input.dst
@@ -625,7 +673,7 @@ fn plan_edge(
             }
         }
     };
-    if let Some(existing) = graph.edges.get(&candidate.id) {
+    if let Some(existing) = graph.edge(&candidate.id) {
         if same_edge_content(existing, &candidate) {
             return Ok(None);
         }
@@ -633,8 +681,8 @@ fn plan_edge(
     Ok(Some(StoredOp::UpsertEdge { edge: candidate }))
 }
 
-fn require_active_node(graph: &MaterializedGraph, id: &str) -> Result<(), EhError> {
-    match graph.nodes.get(id) {
+fn require_active_node(graph: &Overlay<'_>, id: &str) -> Result<(), EhError> {
+    match graph.node(id) {
         Some(node) if node.active => Ok(()),
         Some(_) => Err(EhError::invalid(format!("edge endpoint {id} is inactive"))),
         None => Err(EhError::invalid(format!(

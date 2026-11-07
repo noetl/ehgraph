@@ -19,3 +19,21 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  # Performance harness (C17, docs/wiki/Performance.md). Non-gating: it reports
+  # REGRESSION lines and uploads perf.json, but never fails the build.
+  bench:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+      - name: perf
+        run: cargo bench -p ehgraph --bench perf -- --elements 50000 --check --json perf.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf
+          path: perf.json

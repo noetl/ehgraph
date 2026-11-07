@@ -50,6 +50,11 @@ pub fn render(engine: &Engine, mode: &str) -> String {
             ));
         }
     }
+    out.push_str("# TYPE ehgraph_head_view_bytes gauge\n");
+    out.push_str(&format!(
+        "ehgraph_head_view_bytes{{instance_id=\"{instance}\",domain=\"{domain}\"}} {}\n",
+        engine.head_views.bytes()
+    ));
     out.push_str("# TYPE ehgraph_budget_bytes gauge\n");
     for (kind, value) in [
         ("resident_graph", engine.resident_graph_bytes),

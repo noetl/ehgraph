@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ehgraph_backup::{self, NamespaceCheckpoint};
@@ -50,6 +51,28 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+/// Query views of each namespace at head, for sessionless reads (C17).
+///
+/// Building a view is O(namespace), so doing it per call made every sessionless read
+/// as slow as a full scan. A view is reused until the head moves. Only views up to
+/// `per_session_bytes` are kept, so the cache is bounded like one session per
+/// namespace; a larger namespace is still served, just rebuilt per call (open a
+/// session for repeated reads of a large graph).
+#[derive(Default)]
+pub struct HeadViews {
+    views: Mutex<HashMap<String, Arc<SessionGraph>>>,
+}
+
+impl HeadViews {
+    /// Resident bytes of the cached views.
+    pub fn bytes(&self) -> u64 {
+        self.views
+            .lock()
+            .map(|views| views.values().map(|v| v.resident_bytes).sum())
+            .unwrap_or(0)
+    }
+}
+
 pub struct Engine {
     pub store: Arc<Store>,
     pub sessions: Arc<SessionRegistry>,
@@ -60,6 +83,7 @@ pub struct Engine {
     pub per_session_bytes: u64,
     /// `0` is unlimited.
     pub resident_graph_bytes: u64,
+    pub head_views: HeadViews,
 }
 
 impl Engine {
@@ -196,6 +220,13 @@ impl Engine {
     fn read_node(&self, args: &Value, caller: &Caller, now_ms: i64) -> Result<Envelope, EhError> {
         let located = locate(args)?;
         self.require(caller, &located.namespace, false)?;
+        let wanted = located.id.clone().unwrap_or_default();
+        if let Some(found) = self.head_lookup(&located, |g| g.nodes.get(&wanted).cloned()) {
+            let (version, node) = found?;
+            let node =
+                node.ok_or_else(|| EhError::not_found(format!("node {wanted} not found")))?;
+            return Ok(self.done(version, serde_json::to_value(node)?));
+        }
         let (version, node) = self.with_graph(&located, now_ms, |graph| {
             graph
                 .node(&located.id.clone().unwrap_or_default())
@@ -217,6 +248,11 @@ impl Engine {
             .id
             .clone()
             .ok_or_else(|| EhError::invalid("id is required"))?;
+        if let Some(found) = self.head_lookup(&located, |g| g.edges.get(&id).cloned()) {
+            let (version, edge) = found?;
+            let edge = edge.ok_or_else(|| EhError::not_found(format!("edge {id} not found")))?;
+            return Ok(self.done(version, serde_json::to_value(edge)?));
+        }
         let (version, edge) = self.with_graph(&located, now_ms, |graph| {
             graph
                 .edge(&id)
@@ -640,10 +676,55 @@ impl Engine {
             return slot
                 .unwrap_or_else(|| Err(EhError::unavailable("session read produced no result")));
         }
+        let head = self.store.head(&located.namespace)?;
+        if located.version.is_none_or(|version| version == head) {
+            let view = self.head_view(&located.namespace)?;
+            return Ok((view.version, f(&view)?));
+        }
         let materialized = self.store.graph_at(&located.namespace, located.version)?;
         let graph = SessionGraph::from_materialized(&materialized)?;
         let version = graph.version;
         Ok((version, f(&graph)?))
+    }
+
+    fn head_view(&self, namespace: &str) -> Result<Arc<SessionGraph>, EhError> {
+        let head = self.store.head(namespace)?;
+        if let Ok(views) = self.head_views.views.lock() {
+            if let Some(view) = views.get(namespace).filter(|v| v.version == head) {
+                return Ok(view.clone());
+            }
+        }
+        let view = Arc::new(SessionGraph::from_materialized(
+            &self.store.graph_at(namespace, None)?,
+        )?);
+        if let Ok(mut views) = self.head_views.views.lock() {
+            if view.resident_bytes <= self.per_session_bytes {
+                let newer = views
+                    .get(namespace)
+                    .is_some_and(|cached| cached.version > view.version);
+                if !newer {
+                    views.insert(namespace.to_string(), view.clone());
+                }
+            } else {
+                views.remove(namespace);
+            }
+        }
+        Ok(view)
+    }
+
+    /// Point read at head straight from the live graph: no view, no copy.
+    fn head_lookup<T>(
+        &self,
+        located: &Located,
+        f: impl FnOnce(&ehgraph_store::MaterializedGraph) -> Option<T>,
+    ) -> Option<Result<(u64, Option<T>), EhError>> {
+        if located.graph_session_id.is_some() || located.version.is_some() {
+            return None;
+        }
+        Some(
+            self.store
+                .with_head(&located.namespace, |graph| (graph.version, f(graph))),
+        )
     }
 
     fn require(&self, caller: &Caller, namespace: &str, write: bool) -> Result<(), EhError> {

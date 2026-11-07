@@ -184,6 +184,10 @@ Format: `[ID] [P?] [Story] Description`. `[P]` marks tasks that can run in paral
   leftover cleanup on open, `STORE_FORMAT` 2 for compacted manifests only, floor-pinned
   retention, `NOT_FOUND` below the floor, post-backup hook (`[store] compaction`), log
   metrics. Tests: `ehgraph-store/tests/compaction.rs`, `roundtrip.rs`, `embedded.rs`.
+- [X] T059 C17 performance targets (`noetl/ehgraph#7`): targets per tool class (wiki
+  Performance), `benches/perf.rs` harness with `--check`/`--json`, non-gating CI `bench`
+  job. Fixes: direct sessionless point reads, a cached head view, an overlay instead of a
+  graph clone in `plan_upsert`, and an unsynced derived marker.
 - [X] T052 E2 single-writer guard: process-wide `instance_id`/`domain` claim for embedded
   primaries, and `EmbeddedConfig::check_single_writer` (`host_replicas = 1`, ordinal 0,
   leader). Tests in `embedded.rs`.

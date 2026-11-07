@@ -23,6 +23,7 @@ Each instance is a single primary in this release. It has its own change log, sn
 - [Architecture](Architecture) — instance, namespace, change log, sessions
 - [API and MCP](API-and-MCP) — tools, the result envelope, errors
 - [Operations](Operations) — health, metrics, backup, Kubernetes
+- [Performance](Performance) — targets, the benchmark harness, measured numbers
 - [Developer Guide](Developer-Guide) — crates, build, test, contributing
 - [Roadmap](Roadmap) — replicas later, sharding not now
 - [Tool contract](Tool-Contract) — the MVP tool surface

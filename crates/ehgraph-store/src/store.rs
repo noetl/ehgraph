@@ -469,6 +469,21 @@ impl Store {
         materialize_to(&self.cfg, namespace, &ns.manifest, version)
     }
 
+    /// Run `f` on the live graph at head, under the store lock, without copying it.
+    /// For point reads; keep `f` short, it blocks writers.
+    pub fn with_head<T>(
+        &self,
+        namespace: &str,
+        f: impl FnOnce(&MaterializedGraph) -> T,
+    ) -> Result<T, EhError> {
+        let inner = self.lock()?;
+        let ns = inner
+            .namespaces
+            .get(namespace)
+            .ok_or_else(|| EhError::not_found(format!("namespace {namespace} not found")))?;
+        Ok(f(&ns.graph))
+    }
+
     pub fn create_snapshot(&self, namespace: &str, scope: &Scope) -> Result<SnapshotInfo, EhError> {
         let mut inner = self.lock()?;
         let ns = inner
@@ -1677,10 +1692,17 @@ fn write_derived_marker(cfg: &StoreConfig, namespace: &str, version: u64) -> Res
         "derived": true,
         "note": "Safe to delete. Open rebuilds this namespace from the change log and full snapshots."
     });
-    atomic_write(
-        &ns_dir(cfg, namespace).join("derived").join("cache.json"),
-        &serde_json::to_vec_pretty(&body)?,
-    )
+    // Never read back (open rebuilds from the log), so it needs no fsync: a crash may
+    // lose or truncate it and nothing cares. Skipping the two fsyncs here is most of a
+    // small commit's latency on a flush-heavy disk (C17).
+    let path = ns_dir(cfg, namespace).join("derived").join("cache.json");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&body)?)?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 fn ns_dir(cfg: &StoreConfig, namespace: &str) -> PathBuf {

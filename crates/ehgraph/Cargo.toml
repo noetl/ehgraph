@@ -26,3 +26,7 @@ ehgraph-store = { workspace = true }
 http-body-util = { workspace = true }
 tempfile = { workspace = true }
 tower = { workspace = true }
+
+[[bench]]
+name = "perf"
+harness = false

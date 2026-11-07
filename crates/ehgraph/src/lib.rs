@@ -222,6 +222,7 @@ impl EhGraph {
             global_bytes: budgets.global_bytes,
             per_session_bytes: budgets.per_session_bytes,
             resident_graph_bytes: budgets.resident_graph_bytes,
+            head_views: Default::default(),
         });
         tracing::info!(
             instance_id = %identity.instance_id,

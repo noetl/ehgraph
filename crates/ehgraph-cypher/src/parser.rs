@@ -16,14 +16,24 @@ pub fn parse(src: &str) -> Result<Query, CypherError> {
         i: 0,
         src: src.chars().collect(),
     };
-    let query = p.query()?;
-    if p.is_kw("UNION") {
-        return Err(CypherError::unsupported("UNION"));
+    let mut query = p.query()?;
+    while p.eat_kw("UNION") {
+        let all = p.eat_kw("ALL");
+        let part = p.query()?;
+        query.unions.push((all, part.clauses));
+    }
+    if let Some((first, _)) = query.unions.first() {
+        if query.unions.iter().any(|(all, _)| all != first) {
+            return Err(CypherError::syntax(
+                "UNION and UNION ALL cannot be mixed in one query",
+            ));
+        }
     }
     while p.eat(&Tok::Semi) {}
     if !p.at(&Tok::Eof) {
         return Err(p.unexpected("end of query"));
     }
+    crate::check::check(&mut query)?;
     Ok(query)
 }
 
@@ -146,7 +156,7 @@ impl Parser {
                 break;
             }
             if self.is_kw("UNION") {
-                return Err(CypherError::unsupported("UNION"));
+                break;
             }
             if self.is_kw("CALL") {
                 return Err(CypherError::unsupported("CALL (procedures and subqueries)"));
@@ -182,7 +192,10 @@ impl Parser {
                 "a query must end with RETURN or an updating clause".to_string(),
             ));
         }
-        Ok(Query { clauses })
+        Ok(Query {
+            clauses,
+            unions: Vec::new(),
+        })
     }
 
     fn clause(&mut self) -> Result<Clause, CypherError> {
@@ -286,7 +299,17 @@ impl Parser {
     fn set_items(&mut self) -> Result<Vec<SetItem>, CypherError> {
         let mut items = Vec::new();
         loop {
+            // `SET (n).k = v` is the same as `SET n.k = v`.
+            let parenthesized = self.at(&Tok::LParen)
+                && matches!(self.peek_at(1), Tok::Ident { .. })
+                && self.peek_at(2) == &Tok::RParen;
+            if parenthesized {
+                self.bump();
+            }
             let var = self.variable()?;
+            if parenthesized {
+                self.bump();
+            }
             if self.eat(&Tok::Dot) {
                 let key = self.ident("a property key")?;
                 self.expect(&Tok::Eq, "=")?;
@@ -592,8 +615,11 @@ impl Parser {
         self.comparison()
     }
 
+    /// Comparisons chain: `a < b <= c` is `a < b AND b <= c`.
     fn comparison(&mut self) -> Result<Expr, CypherError> {
-        let mut left = self.predicate()?;
+        let first = self.predicate()?;
+        let mut left = first.clone();
+        let mut chain: Option<Expr> = None;
         loop {
             let op = match self.peek() {
                 Tok::Eq => BinOp::Eq,
@@ -606,9 +632,14 @@ impl Parser {
             };
             self.bump();
             let right = self.predicate()?;
-            left = Expr::Binary(op, Box::new(left), Box::new(right));
+            let link = Expr::Binary(op, Box::new(left), Box::new(right.clone()));
+            chain = Some(match chain {
+                None => link,
+                Some(prev) => Expr::Binary(BinOp::And, Box::new(prev), Box::new(link)),
+            });
+            left = right;
         }
-        Ok(left)
+        Ok(chain.unwrap_or(first))
     }
 
     fn predicate(&mut self) -> Result<Expr, CypherError> {
@@ -673,11 +704,12 @@ impl Parser {
         Ok(left)
     }
 
+    /// `^` is left-associative in openCypher: `2 ^ 3 ^ 2` is `(2 ^ 3) ^ 2`.
     fn power(&mut self) -> Result<Expr, CypherError> {
-        let left = self.unary()?;
-        if self.eat(&Tok::Caret) {
-            let right = self.power()?;
-            return Ok(Expr::Binary(BinOp::Pow, Box::new(left), Box::new(right)));
+        let mut left = self.unary()?;
+        while self.eat(&Tok::Caret) {
+            let right = self.unary()?;
+            left = Expr::Binary(BinOp::Pow, Box::new(left), Box::new(right));
         }
         Ok(left)
     }
@@ -686,7 +718,11 @@ impl Parser {
         if self.eat(&Tok::Minus) {
             let inner = self.unary()?;
             return Ok(match inner {
-                Expr::Lit(Val::Int(i)) => Expr::Lit(Val::Int(-i)),
+                Expr::Lit(Val::Int(i)) => {
+                    Expr::Lit(Val::Int(i.checked_neg().ok_or_else(|| {
+                        CypherError::syntax("integer literal out of range")
+                    })?))
+                }
                 Expr::Lit(Val::Float(f)) => Expr::Lit(Val::Float(-f)),
                 other => Expr::Unary(UnOp::Neg, Box::new(other)),
             });
@@ -780,6 +816,13 @@ impl Parser {
                 Ok(Expr::Param(name))
             }
             Tok::LParen => {
+                // A pattern predicate `(a)-[:T]->(b)` or a parenthesized expression.
+                if let Some(part) = self.try_relationship_pattern() {
+                    return Ok(Expr::Exists {
+                        patterns: vec![part],
+                        where_: None,
+                    });
+                }
                 self.bump();
                 let e = self.expr()?;
                 self.expect(&Tok::RParen, ")")?;
@@ -787,6 +830,32 @@ impl Parser {
             }
             Tok::LBracket => {
                 self.bump();
+                // Pattern comprehension `[(a)-->(b) WHERE pred | proj]`.
+                let starts_pattern = self.at(&Tok::LParen)
+                    || (matches!(self.peek(), Tok::Ident { .. })
+                        && self.peek_at(1) == &Tok::Eq
+                        && self.peek_at(2) == &Tok::LParen);
+                if starts_pattern {
+                    let save = self.i;
+                    if let Some(part) = self.try_relationship_pattern() {
+                        if self.is_kw("WHERE") || self.at(&Tok::Pipe) {
+                            let pred = if self.eat_kw("WHERE") {
+                                Some(Box::new(self.expr()?))
+                            } else {
+                                None
+                            };
+                            self.expect(&Tok::Pipe, "| in a pattern comprehension")?;
+                            let proj = Box::new(self.expr()?);
+                            self.expect(&Tok::RBracket, "]")?;
+                            return Ok(Expr::PatternComp {
+                                part: Box::new(part),
+                                pred,
+                                proj,
+                            });
+                        }
+                    }
+                    self.i = save;
+                }
                 if matches!(self.peek(), Tok::Ident { .. }) && self.is_kw_at(1, "IN") {
                     let var = self.variable()?;
                     self.bump();
@@ -843,7 +912,22 @@ impl Parser {
                             return self.case_expr();
                         }
                         "EXISTS" if self.peek_at(1) == &Tok::LBrace => {
-                            return Err(CypherError::unsupported("EXISTS { subquery }"));
+                            self.bump();
+                            self.bump();
+                            let _ = self.eat_kw("MATCH");
+                            let patterns = self.pattern()?;
+                            let where_ = if self.eat_kw("WHERE") {
+                                Some(Box::new(self.expr()?))
+                            } else {
+                                None
+                            };
+                            if !self.at(&Tok::RBrace) {
+                                return Err(CypherError::unsupported(
+                                    "EXISTS { subquery } with clauses other than MATCH ... WHERE",
+                                ));
+                            }
+                            self.bump();
+                            return Ok(Expr::Exists { patterns, where_ });
                         }
                         _ => {}
                     }
@@ -886,6 +970,19 @@ impl Parser {
                 Ok(Expr::Var(self.variable()?))
             }
             _ => Err(self.unexpected("an expression")),
+        }
+    }
+
+    /// Speculatively parse a pattern with at least one relationship, restoring the
+    /// position when the tokens are not one.
+    fn try_relationship_pattern(&mut self) -> Option<PatternPart> {
+        let save = self.i;
+        match self.pattern_part() {
+            Ok(part) if !part.chain.is_empty() => Some(part),
+            _ => {
+                self.i = save;
+                None
+            }
         }
     }
 

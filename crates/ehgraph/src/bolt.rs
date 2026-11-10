@@ -130,9 +130,11 @@ impl Pack {
                     .collect::<Result<_, String>>()?,
             ),
             Pack::Bytes(_) => return Err("byte arrays are not supported as parameters".into()),
-            Pack::Struct(sig, _) => return Err(format!(
+            Pack::Struct(sig, _) => {
+                return Err(format!(
                 "structure 0x{sig:02X} (temporal/spatial/graph) is not supported as a parameter"
-            )),
+            ))
+            }
         })
     }
 }

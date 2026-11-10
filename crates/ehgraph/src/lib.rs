@@ -61,7 +61,7 @@ pub use config::{
     AuthConfig, BudgetConfig, Budgets, EmbeddedConfig, Grant, GraphConfig, SessionConfig,
     StoreSection,
 };
-pub use ehgraph_api::{Caller, CypherRun, ToolSpec};
+pub use ehgraph_api::{Caller, CypherRun, ToolSpec, TxBegin, TxCommitted, TxInfo};
 pub use ehgraph_backup::{
     restore, Backup, Checkpoint, ObjectStore, TargetConfig as BackupTargetConfig, TokenProvider,
 };
@@ -83,7 +83,7 @@ impl std::fmt::Debug for OpenOptions {
             .finish()
     }
 }
-pub use ehgraph_core::{EhError, Envelope, ErrorCode, InstanceIdentity, Role};
+pub use ehgraph_core::{EhError, Envelope, ErrorCode, Expect, InstanceIdentity, Role};
 
 /// How an instance is reached. Reported by `/healthz` and the `ehgraph_info` metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +224,7 @@ impl EhGraph {
             per_session_bytes: budgets.per_session_bytes,
             resident_graph_bytes: budgets.resident_graph_bytes,
             head_views: Default::default(),
+            txs: Default::default(),
         });
         tracing::info!(
             instance_id = %identity.instance_id,
@@ -279,6 +280,46 @@ impl EhGraph {
     ) -> Result<ehgraph_api::CypherRun, EhError> {
         self.engine()?
             .run_cypher(args, caller, ehgraph_core::now_ms())
+    }
+
+    /// Open a multi-statement transaction as `caller` (see `graph.tx.begin`).
+    pub fn tx_begin_as(&self, caller: &Caller, opts: TxBegin) -> Result<TxInfo, EhError> {
+        self.engine()?
+            .tx_begin(caller, opts, ehgraph_core::now_ms())
+    }
+
+    /// Run one statement inside transaction `tx_id`.
+    pub fn tx_run_as(
+        &self,
+        caller: &Caller,
+        tx_id: &str,
+        query: &str,
+        params: &serde_json::Map<String, Value>,
+    ) -> Result<CypherRun, EhError> {
+        self.engine()?
+            .tx_run(caller, tx_id, query, params, None, ehgraph_core::now_ms())
+    }
+
+    /// Commit transaction `tx_id` (serializable; one graph version).
+    pub fn tx_commit_as(
+        &self,
+        caller: &Caller,
+        tx_id: &str,
+        expect: &Expect,
+    ) -> Result<TxCommitted, EhError> {
+        self.engine()?
+            .tx_commit(caller, tx_id, expect, None, ehgraph_core::now_ms())
+    }
+
+    /// The idle deadline (ms) of an open transaction.
+    pub fn tx_expires(&self, tx_id: &str) -> Option<i64> {
+        self.engine().ok()?.tx_expires(tx_id)
+    }
+
+    /// Roll back transaction `tx_id`. `Ok(false)` when it was already gone.
+    pub fn tx_rollback_as(&self, caller: &Caller, tx_id: &str) -> Result<bool, EhError> {
+        self.engine()?
+            .tx_rollback(caller, tx_id, ehgraph_core::now_ms())
     }
 
     fn engine(&self) -> Result<Arc<Engine>, EhError> {
@@ -395,7 +436,10 @@ impl EhGraph {
 
     /// Expire idle and over-lifetime sessions now.
     pub fn sweep_now(&self) -> Result<(), EhError> {
-        self.engine()?.sessions.sweep(ehgraph_core::now_ms())
+        let engine = self.engine()?;
+        let now = ehgraph_core::now_ms();
+        engine.txs.sweep(now);
+        engine.sessions.sweep(now)
     }
 
     /// Start the session sweep (every second) and, when `backup_interval_s > 0`,

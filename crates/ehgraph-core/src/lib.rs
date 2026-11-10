@@ -14,7 +14,8 @@ pub use error::{EhError, ErrorBody, ErrorCode};
 pub use ids::{canonical_hash, default_edge_id, validate_id, validate_namespace, validate_owner};
 pub use model::{
     same_edge_content, same_node_content, ActiveFilter, ChangeBatch, Edge, EdgeInput, ElementKind,
-    FrameBody, IdempotencyNote, InstanceIdentity, Node, NodeInput, Role, StoredOp, WriteRequest,
+    Expect, FrameBody, IdempotencyNote, InstanceIdentity, Node, NodeInput, Role, StoredOp,
+    WriteRequest,
 };
 pub use props::{PropPredicate, PropValue};
 pub use schema::{SchemaConfig, TypeRule};

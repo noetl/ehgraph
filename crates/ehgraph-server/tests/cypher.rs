@@ -333,9 +333,11 @@ async fn cypher_writes_round_trip_through_existing_ops() {
     assert_eq!(out["data"]["rows"], json!([["Forte", 1024]]));
     assert_eq!(out["data"]["stats"]["nodes_created"], 3);
     assert_eq!(out["data"]["stats"]["relationships_created"], 1);
-    // All upserts commit as one version through graph.upsert.
+    // The whole statement commits atomically as one version.
     assert_eq!(out["data"]["writes"].as_array().unwrap().len(), 1);
-    assert_eq!(out["data"]["writes"][0]["op"], "graph.upsert");
+    assert_eq!(out["data"]["writes"][0]["op"], "commit");
+    assert_eq!(out["data"]["writes"][0]["upserted"], 4);
+    assert_eq!(out["data"]["writes"][0]["deactivated"], 0);
     let v1 = out["graph_version"].as_u64().unwrap();
     assert_eq!(head(app).await, v1);
 
@@ -564,7 +566,8 @@ async fn delete_is_soft_deactivation() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{out}");
-    assert_eq!(out["data"]["writes"][0]["op"], "graph.deactivate");
+    assert_eq!(out["data"]["writes"][0]["op"], "commit");
+    assert_eq!(out["data"]["writes"][0]["deactivated"], 2);
     assert_eq!(out["data"]["stats"]["nodes_deleted"], 1);
 
     // DETACH DELETE takes the incident edges with it.

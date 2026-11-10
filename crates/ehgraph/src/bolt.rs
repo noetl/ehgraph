@@ -6,9 +6,14 @@
 //!   stable hash of the element id.
 //! - Messages: HELLO, LOGON/LOGOFF, RUN, PULL, DISCARD, BEGIN, COMMIT, ROLLBACK,
 //!   RESET, GOODBYE, TELEMETRY. ROUTE is refused (use `bolt://`, not `neo4j://`).
-//! - Each RUN is one `graph.cypher` call, committed when it runs. BEGIN/COMMIT are
-//!   accepted so `execute_read`/`execute_write` work, but there is no multi-statement
-//!   atomicity: ROLLBACK after a write in the transaction fails loudly.
+//! - An auto-commit RUN is one `graph.cypher` call: atomic, one graph version,
+//!   serializable (re-run on a lost race).
+//! - BEGIN opens a real ehgraph transaction (`graph.tx.*`): RUNs read the snapshot
+//!   plus the transaction's own writes, COMMIT validates and writes everything as one
+//!   graph version, ROLLBACK / RESET / a failed RUN / a dropped connection discard it.
+//!   A lost race at COMMIT fails with `Neo.TransientError.Transaction.Outdated`, which
+//!   the drivers' `execute_write` retries. BEGIN `tx_metadata.expect` carries
+//!   `{graph_version, versions}` preconditions checked at COMMIT.
 //! - Auth: the password (basic) or token (bearer) is the ehgraph bearer token.
 //! - Database = ehgraph namespace (`session(database=...)`), else the configured default.
 //!
@@ -337,9 +342,20 @@ struct Pending {
     summary: Vec<(&'static str, Pack)>,
 }
 
+/// An open explicit transaction. Dropping it (RESET, ROLLBACK, GOODBYE, a dropped
+/// connection) rolls it back; after COMMIT the rollback is a no-op.
 struct Tx {
-    db: Option<String>,
-    wrote: bool,
+    db: String,
+    tx_id: String,
+    expect: crate::Expect,
+    caller: Caller,
+    graph: EhGraph,
+}
+
+impl Drop for Tx {
+    fn drop(&mut self) {
+        let _ = self.graph.tx_rollback_as(&self.caller, &self.tx_id);
+    }
 }
 
 async fn read_message<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<Vec<u8>> {
@@ -405,10 +421,19 @@ fn neo4j_code(err: &EhError) -> &'static str {
     }
     match err.code {
         crate::ErrorCode::Unauthorized => "Neo.ClientError.Security.Unauthorized",
+        crate::ErrorCode::NotFound if err.message.starts_with("transaction ") => {
+            "Neo.ClientError.Transaction.TransactionNotFound"
+        }
         crate::ErrorCode::NotFound => "Neo.ClientError.Database.DatabaseNotFound",
         crate::ErrorCode::Unavailable | crate::ErrorCode::MemoryBudgetExceeded => {
             "Neo.TransientError.General.DatabaseUnavailable"
         }
+        // A lost race: drivers retry transient errors (`execute_write`).
+        crate::ErrorCode::VersionConflict if err.message.starts_with("serialization conflict") => {
+            "Neo.TransientError.Transaction.Outdated"
+        }
+        crate::ErrorCode::VersionConflict => "Neo.ClientError.Schema.ConstraintValidationFailed",
+        crate::ErrorCode::Conflict => "Neo.ClientError.Schema.ConstraintValidationFailed",
         _ => "Neo.ClientError.Statement.ArgumentError",
     }
 }
@@ -528,32 +553,129 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
                 .await?;
             }
             BEGIN => {
-                let db = arg(0).get("db").and_then(Pack::as_str).map(str::to_string);
-                tx = Some(Tx { db, wrote: false });
-                success(&mut stream, vec![]).await?;
-            }
-            COMMIT => {
-                tx = None;
-                success(
-                    &mut stream,
-                    vec![("bookmark", Pack::Str("ehgraph:committed".into()))],
-                )
-                .await?;
-            }
-            ROLLBACK => {
-                let wrote = tx.as_ref().is_some_and(|t| t.wrote);
-                tx = None;
-                if wrote {
+                let Some(c) = caller.clone() else {
                     failed = true;
                     failure(
                         &mut stream,
-                        "Neo.DatabaseError.Transaction.TransactionRollbackFailed",
-                        "ehgraph commits each Bolt statement when it runs; writes in this transaction cannot be rolled back",
+                        "Neo.ClientError.Security.Unauthorized",
+                        "HELLO first",
                     )
                     .await?;
-                } else {
-                    success(&mut stream, vec![]).await?;
+                    continue;
+                };
+                let extra = arg(0);
+                let db = extra
+                    .get("db")
+                    .and_then(Pack::as_str)
+                    .map(str::to_string)
+                    .or_else(|| options.default_namespace.clone());
+                let Some(db) = db else {
+                    failed = true;
+                    failure(
+                        &mut stream,
+                        "Neo.ClientError.Database.DatabaseNotFound",
+                        "no database given and no default namespace configured; open the session with database=<namespace>",
+                    )
+                    .await?;
+                    continue;
+                };
+                let meta = extra.get("tx_metadata").map(Pack::to_json);
+                let expect = match meta {
+                    Some(Ok(m)) => match m.get("expect") {
+                        Some(e) => serde_json::from_value::<crate::Expect>(e.clone())
+                            .map_err(|err| format!("tx_metadata.expect: {err}")),
+                        None => Ok(Default::default()),
+                    },
+                    Some(Err(msg)) => Err(msg),
+                    None => Ok(Default::default()),
+                };
+                let expect = match expect {
+                    Ok(e) => e,
+                    Err(msg) => {
+                        failed = true;
+                        failure(&mut stream, "Neo.ClientError.Request.Invalid", &msg).await?;
+                        continue;
+                    }
+                };
+                let timeout_ms = match extra.get("tx_timeout") {
+                    Some(Pack::Int(ms)) if *ms > 0 => {
+                        Some((*ms).min(ehgraph_api::MAX_TX_TIMEOUT_MS))
+                    }
+                    _ => None,
+                };
+                let opts = crate::TxBegin {
+                    namespace: db.clone(),
+                    timeout_ms,
+                    source: None,
+                    execution_id: None,
+                };
+                let g = graph.clone();
+                let c2 = c.clone();
+                let begun = tokio::task::spawn_blocking(move || g.tx_begin_as(&c2, opts))
+                    .await
+                    .map_err(|err| EhError::unavailable(format!("engine task failed: {err}")))
+                    .and_then(|r| r);
+                match begun {
+                    Ok(info) => {
+                        tx = Some(Tx {
+                            db,
+                            tx_id: info.tx_id,
+                            expect,
+                            caller: c,
+                            graph: graph.clone(),
+                        });
+                        success(&mut stream, vec![]).await?;
+                    }
+                    Err(err) => {
+                        failed = true;
+                        failure(&mut stream, neo4j_code(&err), &err.message).await?;
+                    }
                 }
+            }
+            COMMIT => {
+                let Some(t) = tx.take() else {
+                    failed = true;
+                    failure(
+                        &mut stream,
+                        "Neo.ClientError.Request.Invalid",
+                        "COMMIT without BEGIN",
+                    )
+                    .await?;
+                    continue;
+                };
+                let g = graph.clone();
+                let (c, id, expect, db) = (
+                    t.caller.clone(),
+                    t.tx_id.clone(),
+                    t.expect.clone(),
+                    t.db.clone(),
+                );
+                let done = tokio::task::spawn_blocking(move || g.tx_commit_as(&c, &id, &expect))
+                    .await
+                    .map_err(|err| EhError::unavailable(format!("engine task failed: {err}")))
+                    .and_then(|r| r);
+                drop(t);
+                match done {
+                    Ok(done) => {
+                        success(
+                            &mut stream,
+                            vec![(
+                                "bookmark",
+                                Pack::Str(format!("ehgraph:{db}:{}", done.graph_version)),
+                            )],
+                        )
+                        .await?;
+                    }
+                    Err(err) => {
+                        failed = true;
+                        failure(&mut stream, neo4j_code(&err), &err.message).await?;
+                    }
+                }
+            }
+            ROLLBACK => {
+                // Dropping the transaction rolls it back.
+                tx = None;
+                success(&mut stream, vec![]).await?;
             }
             RUN => {
                 let Some(c) = caller.clone() else {
@@ -580,11 +702,10 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
                     }
                 };
                 let extra = arg(2);
-                let db = extra
-                    .get("db")
-                    .and_then(Pack::as_str)
-                    .map(str::to_string)
-                    .or_else(|| tx.as_ref().and_then(|t| t.db.clone()))
+                let db = tx
+                    .as_ref()
+                    .map(|t| t.db.clone())
+                    .or_else(|| extra.get("db").and_then(Pack::as_str).map(str::to_string))
                     .or_else(|| options.default_namespace.clone());
                 let Some(db) = db else {
                     failed = true;
@@ -596,18 +717,25 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
                     .await?;
                     continue;
                 };
-                let args = json!({"namespace": db, "query": query, "params": params});
                 let g = graph.clone();
-                let result = tokio::task::spawn_blocking(move || g.cypher_as(&c, &args))
-                    .await
-                    .map_err(|err| EhError::unavailable(format!("engine task failed: {err}")))
-                    .and_then(|r| r);
+                let in_tx = tx.as_ref().map(|t| t.tx_id.clone());
+                let db_arg = db.clone();
+                let result = tokio::task::spawn_blocking(move || match in_tx {
+                    Some(tx_id) => {
+                        let params = params.as_object().cloned().unwrap_or_default();
+                        g.tx_run_as(&c, &tx_id, &query, &params)
+                    }
+                    None => {
+                        let args = json!({"namespace": db_arg, "query": query, "params": params});
+                        g.cypher_as(&c, &args)
+                    }
+                })
+                .await
+                .map_err(|err| EhError::unavailable(format!("engine task failed: {err}")))
+                .and_then(|r| r);
                 match result {
                     Ok(run) => {
                         let stats = &run.outcome.stats;
-                        if let Some(t) = tx.as_mut() {
-                            t.wrote |= !run.writes.is_empty();
-                        }
                         let fields: Vec<Pack> =
                             run.outcome.columns.iter().cloned().map(Pack::Str).collect();
                         let rows = run

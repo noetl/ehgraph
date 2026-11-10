@@ -183,13 +183,45 @@ pub fn execute(
     params: &BTreeMap<String, Val>,
     opts: &ExecOptions,
 ) -> Result<Outcome, CypherError> {
+    let mut state = TxState::default();
+    execute_with(graph, &mut state, query, params, opts, query.is_updating())
+}
+
+/// Execute one statement of a transaction against `graph` (the transaction's
+/// snapshot) plus the writes of the transaction's earlier statements, which live in
+/// `state`. The statement's own writes are added to `state`, and everything it read
+/// is added to `state.footprint` for commit-time validation.
+///
+/// `Outcome::changes` is the net effect of the whole transaction so far. After an
+/// error, `state` may hold part of the failed statement: callers must not commit it
+/// (a failed statement fails its transaction, as in Neo4j).
+pub fn execute_in(
+    graph: &SessionGraph,
+    state: &mut TxState,
+    query: &Query,
+    params: &BTreeMap<String, Val>,
+    opts: &ExecOptions,
+) -> Result<Outcome, CypherError> {
+    execute_with(graph, state, query, params, opts, true)
+}
+
+fn execute_with(
+    graph: &SessionGraph,
+    state: &mut TxState,
+    query: &Query,
+    params: &BTreeMap<String, Val>,
+    opts: &ExecOptions,
+    track: bool,
+) -> Result<Outcome, CypherError> {
     if query.is_updating() && opts.visibility != ActiveFilter::Active {
         return Err(CypherError::semantic(
             "updating queries run over active elements only; drop the `active` filter",
         ));
     }
+    let overlay = std::mem::take(&mut state.overlay);
+    let footprint = std::mem::take(&mut state.footprint);
     let mut ex = Exec {
-        w: Work::new(graph),
+        w: Work::with(graph, overlay, footprint, track),
         params,
         opts,
         stats: Stats::default(),
@@ -198,6 +230,14 @@ pub fn execute(
         seq: 0,
         pending_delete_checks: Vec::new(),
     };
+    let result = run(&mut ex, query);
+    let Work { ov, fp, .. } = ex.w;
+    state.overlay = ov;
+    state.footprint = fp.into_inner();
+    result
+}
+
+fn run(ex: &mut Exec<'_, '_>, query: &Query) -> Result<Outcome, CypherError> {
     let mut rows: Vec<Row> = vec![Row::new()];
     let mut columns = Vec::new();
     let mut returned = false;
@@ -325,7 +365,7 @@ pub fn execute(
     Ok(Outcome {
         columns,
         rows: out_rows,
-        stats: ex.stats,
+        stats: std::mem::take(&mut ex.stats),
         changes,
     })
 }
@@ -333,8 +373,10 @@ pub fn execute(
 // ---------------------------------------------------------------------------
 // Working graph: base view + overlay images.
 
-struct Work<'g> {
-    base: &'g SessionGraph,
+/// Writes of a transaction so far: full images of changed elements over the base
+/// view. Owned, so it survives from one statement of a transaction to the next.
+#[derive(Debug, Clone, Default)]
+pub struct Overlay {
     nodes: HashMap<String, Node>,
     edges: HashMap<String, Edge>,
     new_nodes: Vec<String>,
@@ -346,28 +388,130 @@ struct Work<'g> {
     dirty_edge_set: HashSet<String>,
 }
 
+/// What a transaction read (and wrote) from its snapshot, at the granularity
+/// commit-time validation needs. A commit is serializable when no element changed
+/// after the snapshot intersects the footprint:
+///
+/// - `nodes` / `edges`: element ids looked up (present or not) or written;
+/// - `labels`: labels scanned (catches nodes created or relabelled into a scan);
+/// - `out_of` / `in_of`: nodes whose outgoing / incoming adjacency was read
+///   (catches edges created, changed or removed at those nodes);
+/// - `all_nodes`: a label-less node scan (any node change conflicts).
+#[derive(Debug, Clone, Default)]
+pub struct Footprint {
+    pub nodes: HashSet<String>,
+    pub edges: HashSet<String>,
+    pub labels: HashSet<String>,
+    pub out_of: HashSet<String>,
+    pub in_of: HashSet<String>,
+    pub all_nodes: bool,
+}
+
+impl Footprint {
+    pub fn is_empty(&self) -> bool {
+        !self.all_nodes
+            && self.nodes.is_empty()
+            && self.edges.is_empty()
+            && self.labels.is_empty()
+            && self.out_of.is_empty()
+            && self.in_of.is_empty()
+    }
+
+    /// The first element changed after `since` (its `version_updated > since`)
+    /// that this footprint depends on, described for an error message.
+    pub fn conflict<'a>(
+        &self,
+        since: u64,
+        nodes: impl IntoIterator<Item = &'a Node>,
+        edges: impl IntoIterator<Item = &'a Edge>,
+    ) -> Option<String> {
+        for n in nodes {
+            if n.version_updated > since
+                && (self.all_nodes
+                    || self.nodes.contains(&n.id)
+                    || self.labels.contains(&n.type_name))
+            {
+                return Some(format!(
+                    "node {} ({}) changed at version {} after this transaction's snapshot {}",
+                    n.id, n.type_name, n.version_updated, since
+                ));
+            }
+        }
+        for e in edges {
+            if e.version_updated > since
+                && (self.edges.contains(&e.id)
+                    || self.out_of.contains(&e.src)
+                    || self.in_of.contains(&e.dst))
+            {
+                return Some(format!(
+                    "relationship {} changed at version {} after this transaction's snapshot {}",
+                    e.id, e.version_updated, since
+                ));
+            }
+        }
+        None
+    }
+}
+
+/// The per-transaction state `execute_in` carries between statements.
+#[derive(Debug, Clone, Default)]
+pub struct TxState {
+    overlay: Overlay,
+    pub footprint: Footprint,
+}
+
+impl TxState {
+    /// Net effect of the transaction against its snapshot `base`.
+    pub fn changes(&self, base: &SessionGraph) -> Changes {
+        let w = Work::with(base, self.overlay.clone(), Footprint::default(), false);
+        w.changes()
+    }
+
+    /// Whether any statement wrote (the net effect may still be empty).
+    pub fn has_writes(&self) -> bool {
+        !self.overlay.dirty_nodes.is_empty() || !self.overlay.dirty_edges.is_empty()
+    }
+}
+
+struct Work<'g> {
+    base: &'g SessionGraph,
+    ov: Overlay,
+    fp: std::cell::RefCell<Footprint>,
+    track: bool,
+}
+
 impl<'g> Work<'g> {
-    fn new(base: &'g SessionGraph) -> Self {
+    fn with(base: &'g SessionGraph, ov: Overlay, fp: Footprint, track: bool) -> Self {
         Self {
             base,
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
-            new_nodes: Vec::new(),
-            extra_out: HashMap::new(),
-            extra_in: HashMap::new(),
-            dirty_nodes: Vec::new(),
-            dirty_node_set: HashSet::new(),
-            dirty_edges: Vec::new(),
-            dirty_edge_set: HashSet::new(),
+            ov,
+            fp: std::cell::RefCell::new(fp),
+            track,
+        }
+    }
+
+    fn note(&self, f: impl FnOnce(&mut Footprint)) {
+        if self.track {
+            f(&mut self.fp.borrow_mut());
         }
     }
 
     fn node(&self, id: &str) -> Option<&Node> {
-        self.nodes.get(id).or_else(|| self.base.node(id))
+        self.note(|fp| {
+            if !fp.nodes.contains(id) {
+                fp.nodes.insert(id.to_string());
+            }
+        });
+        self.ov.nodes.get(id).or_else(|| self.base.node(id))
     }
 
     fn edge(&self, id: &str) -> Option<&Edge> {
-        self.edges.get(id).or_else(|| self.base.edge(id))
+        self.note(|fp| {
+            if !fp.edges.contains(id) {
+                fp.edges.insert(id.to_string());
+            }
+        });
+        self.ov.edges.get(id).or_else(|| self.base.edge(id))
     }
 
     fn active_node(&self, id: &str) -> bool {
@@ -378,27 +522,34 @@ impl<'g> Work<'g> {
         self.base
             .nodes
             .iter()
-            .map(move |n| self.nodes.get(&n.id).unwrap_or(n))
+            .map(move |n| self.ov.nodes.get(&n.id).unwrap_or(n))
             .chain(
-                self.new_nodes
+                self.ov
+                    .new_nodes
                     .iter()
-                    .filter_map(move |id| self.nodes.get(id)),
+                    .filter_map(move |id| self.ov.nodes.get(id)),
             )
     }
 
     /// Active edges whose own image is active (endpoints not checked).
     fn incident_raw(&self, id: &str, out: bool) -> Vec<&Edge> {
+        self.note(|fp| {
+            let set = if out { &mut fp.out_of } else { &mut fp.in_of };
+            if !set.contains(id) {
+                set.insert(id.to_string());
+            }
+        });
         let (base, extra) = if out {
-            (self.base.out_edges(id), self.extra_out.get(id))
+            (self.base.out_edges(id), self.ov.extra_out.get(id))
         } else {
-            (self.base.in_edges(id), self.extra_in.get(id))
+            (self.base.in_edges(id), self.ov.extra_in.get(id))
         };
         let mut v: Vec<&Edge> = base
             .into_iter()
-            .map(|e| self.edges.get(&e.id).unwrap_or(e))
+            .map(|e| self.ov.edges.get(&e.id).unwrap_or(e))
             .collect();
         if let Some(extra) = extra {
-            v.extend(extra.iter().filter_map(|eid| self.edges.get(eid)));
+            v.extend(extra.iter().filter_map(|eid| self.ov.edges.get(eid)));
         }
         v.retain(|e| e.active);
         v
@@ -420,36 +571,46 @@ impl<'g> Work<'g> {
     }
 
     fn put_node(&mut self, node: Node) {
-        if self.dirty_node_set.insert(node.id.clone()) {
-            self.dirty_nodes.push(node.id.clone());
+        self.note(|fp| {
+            fp.nodes.insert(node.id.clone());
+        });
+        if self.ov.dirty_node_set.insert(node.id.clone()) {
+            self.ov.dirty_nodes.push(node.id.clone());
         }
-        if self.base.node(&node.id).is_none() && !self.nodes.contains_key(&node.id) {
-            self.new_nodes.push(node.id.clone());
+        if self.base.node(&node.id).is_none() && !self.ov.nodes.contains_key(&node.id) {
+            self.ov.new_nodes.push(node.id.clone());
         }
-        self.nodes.insert(node.id.clone(), node);
+        self.ov.nodes.insert(node.id.clone(), node);
     }
 
     fn put_edge(&mut self, edge: Edge) {
-        if self.dirty_edge_set.insert(edge.id.clone()) {
-            self.dirty_edges.push(edge.id.clone());
+        self.note(|fp| {
+            fp.edges.insert(edge.id.clone());
+            fp.out_of.insert(edge.src.clone());
+            fp.in_of.insert(edge.dst.clone());
+        });
+        if self.ov.dirty_edge_set.insert(edge.id.clone()) {
+            self.ov.dirty_edges.push(edge.id.clone());
         }
-        if !self.in_base_csr(&edge.id) && !self.edges.contains_key(&edge.id) {
-            self.extra_out
+        if !self.in_base_csr(&edge.id) && !self.ov.edges.contains_key(&edge.id) {
+            self.ov
+                .extra_out
                 .entry(edge.src.clone())
                 .or_default()
                 .push(edge.id.clone());
-            self.extra_in
+            self.ov
+                .extra_in
                 .entry(edge.dst.clone())
                 .or_default()
                 .push(edge.id.clone());
         }
-        self.edges.insert(edge.id.clone(), edge);
+        self.ov.edges.insert(edge.id.clone(), edge);
     }
 
     fn changes(&self) -> Changes {
         let mut changes = Changes::default();
-        for id in &self.dirty_nodes {
-            let node = &self.nodes[id];
+        for id in &self.ov.dirty_nodes {
+            let node = &self.ov.nodes[id];
             let base_active = self.base.node(id).is_some_and(|n| n.active);
             if node.active {
                 let unchanged = self.base.node(id).is_some_and(|b| {
@@ -469,8 +630,8 @@ impl<'g> Work<'g> {
                 changes.deactivate.push(id.clone());
             }
         }
-        for id in &self.dirty_edges {
-            let edge = &self.edges[id];
+        for id in &self.ov.dirty_edges {
+            let edge = &self.ov.edges[id];
             let base_active = self.base.edge(id).is_some_and(|e| e.active);
             if edge.active {
                 let unchanged = self
@@ -698,11 +859,21 @@ impl Exec<'_, '_> {
                 _ => Vec::new(),
             };
         }
-        self.w
+        let ids: Vec<String> = self
+            .w
             .scan()
             .filter(|n| self.node_ok(np, n, props, row))
             .map(|n| n.id.clone())
-            .collect()
+            .collect();
+        self.w.note(|fp| {
+            if np.labels.is_empty() {
+                fp.all_nodes = true;
+            } else {
+                fp.labels.extend(np.labels.iter().cloned());
+            }
+            fp.nodes.extend(ids.iter().cloned());
+        });
+        ids
     }
 
     /// (edge id, other end) for each traversable edge matching `rp` at `cur`.

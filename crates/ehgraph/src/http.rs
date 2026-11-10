@@ -11,7 +11,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use ehgraph_core::{EhError, Envelope};
 use serde_json::{json, Value};
@@ -27,6 +27,16 @@ pub fn router(graph: EhGraph) -> Router {
         .route("/v1/tools/{tool}", post(http_tool))
         .route("/v1/cypher", post(cypher_route))
         .route("/db/{namespace}/query/v2", post(neo4j_query))
+        .route("/db/{namespace}/query/v2/tx", post(neo4j_tx_open))
+        .route("/db/{namespace}/query/v2/tx/{tx_id}", post(neo4j_tx_run))
+        .route(
+            "/db/{namespace}/query/v2/tx/{tx_id}",
+            delete(neo4j_tx_rollback),
+        )
+        .route(
+            "/db/{namespace}/query/v2/tx/{tx_id}/commit",
+            post(neo4j_tx_commit),
+        )
         .route("/v1/admin/backup", post(admin_backup))
         .with_state(graph)
 }
@@ -120,80 +130,268 @@ async fn neo4j_query(
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    let request: Value = match serde_json::from_str(&body) {
-        Ok(value) => value,
-        Err(err) => {
-            return neo4j_error(
-                StatusCode::BAD_REQUEST,
-                "Neo.ClientError.Request.Invalid",
-                &format!("request json: {err}"),
-            )
-        }
+    let request = match neo4j_body(&body, true) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
     };
-    let Some(statement) = request.get("statement").and_then(Value::as_str) else {
-        return neo4j_error(
-            StatusCode::BAD_REQUEST,
-            "Neo.ClientError.Request.Invalid",
-            "`statement` is required",
-        );
-    };
+    let statement = request["statement"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     let args = json!({
         "namespace": namespace,
         "query": statement,
         "params": request.get("parameters").cloned().unwrap_or(json!({})),
     });
-    let header = auth_header(&headers);
-    let g = graph.clone();
-    let envelope = or_failure(
-        &graph,
-        blocking(move || g.call_with_header(header.as_deref(), "graph.cypher", &args)).await,
-    );
+    let envelope = neo4j_call(&graph, &headers, "graph.cypher", args).await;
     if !envelope.ok {
-        let err = envelope.error.as_ref();
-        let message = err.map(|e| e.message.clone()).unwrap_or_default();
-        let code = match ehgraph_cypher::kind_of_message(&message) {
-            Some(kind) => kind.neo4j_code(),
-            None => match err.map(|e| e.code) {
-                Some(ehgraph_core::ErrorCode::Unauthorized) => {
-                    "Neo.ClientError.Security.Unauthorized"
-                }
-                Some(ehgraph_core::ErrorCode::NotFound) => {
-                    "Neo.ClientError.Database.DatabaseNotFound"
-                }
-                _ => "Neo.ClientError.Statement.ArgumentError",
-            },
-        };
-        let status = StatusCode::from_u16(err.map(|e| e.code.http_status()).unwrap_or(400))
-            .unwrap_or(StatusCode::BAD_REQUEST);
-        return neo4j_error(status, code, &message);
+        return neo4j_failure(&envelope);
     }
-    let data = envelope.data.unwrap_or(Value::Null);
+    let version = envelope.graph_version.unwrap_or(0);
+    let mut out = neo4j_result(envelope.data.as_ref().unwrap_or(&Value::Null));
+    out["bookmarks"] = json!([format!("ehgraph:{namespace}:{version}")]);
+    (StatusCode::ACCEPTED, Json(out)).into_response()
+}
+
+/// `POST /db/{namespace}/query/v2/tx` — open an explicit transaction, optionally
+/// running a first statement in it. Like Neo4j's Query API, the response carries
+/// `transaction: {id, expires}`.
+async fn neo4j_tx_open(
+    State(graph): State<EhGraph>,
+    Path(namespace): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let request = match neo4j_body(&body, false) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let mut begin = json!({"namespace": namespace});
+    if let Some(ms) = request.get("timeout_ms").and_then(Value::as_i64) {
+        begin["timeout_ms"] = json!(ms);
+    }
+    let envelope = neo4j_call(&graph, &headers, "graph.tx.begin", begin).await;
+    if !envelope.ok {
+        return neo4j_failure(&envelope);
+    }
+    let info = envelope.data.unwrap_or(Value::Null);
+    let tx_id = info["tx_id"].as_str().unwrap_or_default().to_string();
+    let mut out = json!({});
+    if request.get("statement").and_then(Value::as_str).is_some() {
+        let run = neo4j_tx_statement(&graph, &headers, &tx_id, &request).await;
+        if !run.ok {
+            return neo4j_failure(&run);
+        }
+        out = neo4j_result(run.data.as_ref().unwrap_or(&Value::Null));
+    }
+    out["transaction"] = neo4j_tx_json(&graph, &tx_id, info["expires_ms"].as_i64());
+    (StatusCode::ACCEPTED, Json(out)).into_response()
+}
+
+/// `POST /db/{namespace}/query/v2/tx/{tx_id}` — run a statement in the transaction.
+async fn neo4j_tx_run(
+    State(graph): State<EhGraph>,
+    Path((_namespace, tx_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let request = match neo4j_body(&body, true) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let run = neo4j_tx_statement(&graph, &headers, &tx_id, &request).await;
+    if !run.ok {
+        return neo4j_failure(&run);
+    }
+    let data = run.data.unwrap_or(Value::Null);
+    let mut out = neo4j_result(&data);
+    out["transaction"] = neo4j_tx_json(&graph, &tx_id, data["expires_ms"].as_i64());
+    (StatusCode::ACCEPTED, Json(out)).into_response()
+}
+
+/// `POST /db/{namespace}/query/v2/tx/{tx_id}/commit` — optionally run a last
+/// statement, then commit. ehgraph extension: `"expect": {graph_version, versions}`.
+async fn neo4j_tx_commit(
+    State(graph): State<EhGraph>,
+    Path((namespace, tx_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let request = match neo4j_body(&body, false) {
+        Ok(r) => r,
+        Err(resp) => return *resp,
+    };
+    let mut out = json!({});
+    if request.get("statement").and_then(Value::as_str).is_some() {
+        let run = neo4j_tx_statement(&graph, &headers, &tx_id, &request).await;
+        if !run.ok {
+            // The statement failed the transaction; release it.
+            let _ = neo4j_call(
+                &graph,
+                &headers,
+                "graph.tx.rollback",
+                json!({"tx_id": tx_id}),
+            )
+            .await;
+            return neo4j_failure(&run);
+        }
+        out = neo4j_result(run.data.as_ref().unwrap_or(&Value::Null));
+    }
+    let mut commit = json!({"tx_id": tx_id});
+    if let Some(expect) = request.get("expect") {
+        commit["expect"] = expect.clone();
+    }
+    let done = neo4j_call(&graph, &headers, "graph.tx.commit", commit).await;
+    if !done.ok {
+        return neo4j_failure(&done);
+    }
+    let version = done.graph_version.unwrap_or(0);
+    out["bookmarks"] = json!([format!("ehgraph:{namespace}:{version}")]);
+    (StatusCode::ACCEPTED, Json(out)).into_response()
+}
+
+/// `DELETE /db/{namespace}/query/v2/tx/{tx_id}` — roll back.
+async fn neo4j_tx_rollback(
+    State(graph): State<EhGraph>,
+    Path((_namespace, tx_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let done = neo4j_call(
+        &graph,
+        &headers,
+        "graph.tx.rollback",
+        json!({"tx_id": tx_id}),
+    )
+    .await;
+    if !done.ok {
+        return neo4j_failure(&done);
+    }
+    let gone = !done
+        .data
+        .as_ref()
+        .and_then(|d| d.get("rolled_back"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if gone {
+        return neo4j_error(
+            StatusCode::NOT_FOUND,
+            "Neo.ClientError.Transaction.TransactionNotFound",
+            &format!("transaction {tx_id} not found (committed, rolled back, or expired)"),
+        );
+    }
+    (StatusCode::ACCEPTED, Json(json!({}))).into_response()
+}
+
+/// Parse a Query API body; `statement` may be required.
+fn neo4j_body(body: &str, statement_required: bool) -> Result<Value, Box<Response>> {
+    let request: Value = if body.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(body).map_err(|err| {
+            Box::new(neo4j_error(
+                StatusCode::BAD_REQUEST,
+                "Neo.ClientError.Request.Invalid",
+                &format!("request json: {err}"),
+            ))
+        })?
+    };
+    if statement_required && request.get("statement").and_then(Value::as_str).is_none() {
+        return Err(Box::new(neo4j_error(
+            StatusCode::BAD_REQUEST,
+            "Neo.ClientError.Request.Invalid",
+            "`statement` is required",
+        )));
+    }
+    Ok(request)
+}
+
+async fn neo4j_call(
+    graph: &EhGraph,
+    headers: &HeaderMap,
+    tool: &'static str,
+    args: Value,
+) -> Envelope {
+    let header = auth_header(headers);
+    let g = graph.clone();
+    or_failure(
+        graph,
+        blocking(move || g.call_with_header(header.as_deref(), tool, &args)).await,
+    )
+}
+
+async fn neo4j_tx_statement(
+    graph: &EhGraph,
+    headers: &HeaderMap,
+    tx_id: &str,
+    request: &Value,
+) -> Envelope {
+    let args = json!({
+        "tx_id": tx_id,
+        "query": request["statement"].as_str().unwrap_or_default(),
+        "params": request.get("parameters").cloned().unwrap_or(json!({})),
+    });
+    neo4j_call(graph, headers, "graph.tx.run", args).await
+}
+
+fn neo4j_tx_json(graph: &EhGraph, tx_id: &str, expires_ms: Option<i64>) -> Value {
+    let expires_ms = expires_ms.or_else(|| graph.tx_expires(tx_id));
+    let expires = expires_ms
+        .map(|ms| ehgraph_core::PropValue::Timestamp(ms).to_json()["$timestamp"].clone())
+        .unwrap_or(Value::Null);
+    json!({"id": tx_id, "expires": expires})
+}
+
+/// A `graph.cypher` / `graph.tx.run` result in the Query API's shape.
+fn neo4j_result(data: &Value) -> Value {
     let stats = &data["stats"];
     let n = |key: &str| stats.get(key).and_then(Value::as_u64).unwrap_or(0);
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "data": {"fields": data["columns"], "values": data["rows"]},
-            "counters": {
-                "containsUpdates": stats.get("contains_updates").and_then(Value::as_bool).unwrap_or(false),
-                "nodesCreated": n("nodes_created"),
-                "nodesDeleted": n("nodes_deleted"),
-                "propertiesSet": n("properties_set"),
-                "relationshipsCreated": n("relationships_created"),
-                "relationshipsDeleted": n("relationships_deleted"),
-                "labelsAdded": 0,
-                "labelsRemoved": 0,
-                "indexesAdded": 0,
-                "indexesRemoved": 0,
-                "constraintsAdded": 0,
-                "constraintsRemoved": 0,
-                "containsSystemUpdates": false,
-                "systemUpdates": 0,
-            },
-            "bookmarks": [format!("ehgraph:{}:{}", namespace, envelope.graph_version.unwrap_or(0))],
-        })),
-    )
-        .into_response()
+    json!({
+        "data": {"fields": data["columns"], "values": data["rows"]},
+        "counters": {
+            "containsUpdates": stats.get("contains_updates").and_then(Value::as_bool).unwrap_or(false),
+            "nodesCreated": n("nodes_created"),
+            "nodesDeleted": n("nodes_deleted"),
+            "propertiesSet": n("properties_set"),
+            "relationshipsCreated": n("relationships_created"),
+            "relationshipsDeleted": n("relationships_deleted"),
+            "labelsAdded": 0,
+            "labelsRemoved": 0,
+            "indexesAdded": 0,
+            "indexesRemoved": 0,
+            "constraintsAdded": 0,
+            "constraintsRemoved": 0,
+            "containsSystemUpdates": false,
+            "systemUpdates": 0,
+        },
+    })
+}
+
+/// A failed envelope as a Query API error response.
+fn neo4j_failure(envelope: &Envelope) -> Response {
+    let err = envelope.error.as_ref();
+    let message = err.map(|e| e.message.clone()).unwrap_or_default();
+    let code = match ehgraph_cypher::kind_of_message(&message) {
+        Some(kind) => kind.neo4j_code(),
+        None => match err.map(|e| e.code) {
+            Some(ehgraph_core::ErrorCode::Unauthorized) => "Neo.ClientError.Security.Unauthorized",
+            Some(ehgraph_core::ErrorCode::NotFound) if message.starts_with("transaction ") => {
+                "Neo.ClientError.Transaction.TransactionNotFound"
+            }
+            Some(ehgraph_core::ErrorCode::NotFound) => "Neo.ClientError.Database.DatabaseNotFound",
+            Some(ehgraph_core::ErrorCode::VersionConflict)
+                if message.starts_with("serialization conflict") =>
+            {
+                "Neo.TransientError.Transaction.Outdated"
+            }
+            Some(ehgraph_core::ErrorCode::VersionConflict | ehgraph_core::ErrorCode::Conflict) => {
+                "Neo.ClientError.Schema.ConstraintValidationFailed"
+            }
+            _ => "Neo.ClientError.Statement.ArgumentError",
+        },
+    };
+    let status = StatusCode::from_u16(err.map(|e| e.code.http_status()).unwrap_or(400))
+        .unwrap_or(StatusCode::BAD_REQUEST);
+    neo4j_error(status, code, &message)
 }
 
 fn neo4j_error(status: StatusCode, code: &str, message: &str) -> Response {

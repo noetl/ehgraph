@@ -201,19 +201,179 @@ async fn bolt_five_runs_cypher_with_element_ids() {
     c.send(0x0F, vec![]).await;
     assert_eq!(c.recv().await.0, 0x70);
 
-    // Explicit transaction: a read-only one can roll back; one that wrote cannot.
+    // Explicit transaction: a read-only one rolls back cleanly.
     c.send(0x11, vec![Pack::Map(vec![])]).await;
     assert_eq!(c.recv().await.0, 0x70);
     let (records, _) = c.query("MATCH (n) RETURN count(n)", Pack::Null).await;
     assert_eq!(records, vec![vec![Pack::Int(2)]]);
     c.send(0x13, vec![]).await;
     assert_eq!(c.recv().await.0, 0x70);
+    // One that wrote rolls back too: the write never reaches the store.
     c.send(0x11, vec![Pack::Map(vec![])]).await;
     assert_eq!(c.recv().await.0, 0x70);
     c.query("CREATE (:Probe {id: 'p'})", Pack::Null).await;
+    let (records, _) = c.query("MATCH (p:Probe) RETURN count(p)", Pack::Null).await;
+    assert_eq!(
+        records,
+        vec![vec![Pack::Int(1)]],
+        "read-your-writes in the tx"
+    );
     c.send(0x13, vec![]).await;
     let (sig, f) = c.recv().await;
+    assert_eq!(sig, 0x70, "{f:?}");
+    let (records, _) = c.query("MATCH (p:Probe) RETURN count(p)", Pack::Null).await;
+    assert_eq!(records, vec![vec![Pack::Int(0)]]);
+}
+
+/// The bookmark's graph version.
+fn bookmark_version(summary: &Pack) -> u64 {
+    match field(summary, "bookmark") {
+        Pack::Str(b) => b.rsplit(':').next().unwrap().parse().unwrap(),
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn begin(c: &mut Client) {
+    c.send(0x11, vec![Pack::Map(vec![])]).await;
+    let (sig, f) = c.recv().await;
+    assert_eq!(sig, 0x70, "BEGIN: {f:?}");
+}
+
+async fn commit(c: &mut Client) -> (u8, Vec<Pack>) {
+    c.send(0x12, vec![]).await;
+    c.recv().await
+}
+
+#[tokio::test]
+async fn bolt_multi_statement_transactions_are_atomic() {
+    let (addr, _dir) = start().await;
+    let five = [0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let (mut c, _) = Client::connect(addr, five).await;
+    c.send(0x01, hello("lab-writer")).await;
+    assert_eq!(c.recv().await.0, 0x70);
+    let (_, summary) = c
+        .query(
+            "CREATE (:Account {id: 'a', balance: 100}), (:Account {id: 'b', balance: 0})",
+            Pack::Null,
+        )
+        .await;
+    let v0 = bookmark_version(&summary);
+
+    // Two statements, one COMMIT, one new version.
+    begin(&mut c).await;
+    c.query(
+        "MATCH (a:Account {id: 'a'}) SET a.balance = a.balance - 40",
+        Pack::Null,
+    )
+    .await;
+    c.query(
+        "MATCH (b:Account {id: 'b'}) SET b.balance = b.balance + 40",
+        Pack::Null,
+    )
+    .await;
+    // Another connection does not see uncommitted writes.
+    let (mut other, _) = Client::connect(addr, five).await;
+    other.send(0x01, hello("lab-writer")).await;
+    assert_eq!(other.recv().await.0, 0x70);
+    let (records, _) = other
+        .query(
+            "MATCH (a:Account) RETURN a.balance ORDER BY a.id",
+            Pack::Null,
+        )
+        .await;
+    assert_eq!(records, vec![vec![Pack::Int(100)], vec![Pack::Int(0)]]);
+    let (sig, f) = commit(&mut c).await;
+    assert_eq!(sig, 0x70, "{f:?}");
+    assert_eq!(bookmark_version(&f[0]), v0 + 1);
+    let (records, _) = other
+        .query(
+            "MATCH (a:Account) RETURN a.balance ORDER BY a.id",
+            Pack::Null,
+        )
+        .await;
+    assert_eq!(records, vec![vec![Pack::Int(60)], vec![Pack::Int(40)]]);
+
+    // A dropped connection rolls its open transaction back.
+    {
+        let (mut d, _) = Client::connect(addr, five).await;
+        d.send(0x01, hello("lab-writer")).await;
+        assert_eq!(d.recv().await.0, 0x70);
+        begin(&mut d).await;
+        d.query("CREATE (:Probe {id: 'dropped'})", Pack::Null).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (records, _) = other
+        .query("MATCH (p:Probe) RETURN count(p)", Pack::Null)
+        .await;
+    assert_eq!(records, vec![vec![Pack::Int(0)]]);
+
+    // A lost race fails COMMIT with a transient code that drivers retry.
+    begin(&mut c).await;
+    c.query(
+        "MATCH (a:Account {id: 'a'}) SET a.balance = a.balance + 1",
+        Pack::Null,
+    )
+    .await;
+    other
+        .query("MATCH (a:Account {id: 'a'}) SET a.balance = 0", Pack::Null)
+        .await;
+    let (sig, f) = commit(&mut c).await;
     assert_eq!(sig, 0x7F, "{f:?}");
+    assert_eq!(
+        field(&f[0], "code"),
+        &Pack::Str("Neo.TransientError.Transaction.Outdated".into())
+    );
+    c.send(0x0F, vec![]).await;
+    assert_eq!(c.recv().await.0, 0x70);
+    let (records, _) = c
+        .query("MATCH (a:Account {id: 'a'}) RETURN a.balance", Pack::Null)
+        .await;
+    assert_eq!(records, vec![vec![Pack::Int(0)]]);
+
+    // A failed statement fails the transaction; RESET discards it.
+    begin(&mut c).await;
+    c.query("CREATE (:Probe {id: 'p1'})", Pack::Null).await;
+    c.send(
+        0x10,
+        vec![
+            Pack::Str("MATCH (n RETURN n".into()),
+            Pack::Null,
+            Pack::Map(vec![]),
+        ],
+    )
+    .await;
+    assert_eq!(c.recv().await.0, 0x7F);
+    c.send(0x0F, vec![]).await;
+    assert_eq!(c.recv().await.0, 0x70);
+    let (records, _) = c.query("MATCH (p:Probe) RETURN count(p)", Pack::Null).await;
+    assert_eq!(records, vec![vec![Pack::Int(0)]]);
+
+    // tx_metadata.expect: commit only if the graph is still at the expected version.
+    let (_, summary) = c.query("RETURN 1", Pack::Null).await;
+    let now = bookmark_version(&summary);
+    let expect = |v: i64| {
+        Pack::Map(vec![(
+            "tx_metadata".into(),
+            Pack::Map(vec![(
+                "expect".into(),
+                Pack::Map(vec![("graph_version".into(), Pack::Int(v))]),
+            )]),
+        )])
+    };
+    c.send(0x11, vec![expect(now as i64 - 1)]).await;
+    assert_eq!(c.recv().await.0, 0x70);
+    c.query("CREATE (:Probe {id: 'stale'})", Pack::Null).await;
+    let (sig, f) = commit(&mut c).await;
+    assert_eq!(sig, 0x7F, "{f:?}");
+    c.send(0x0F, vec![]).await;
+    assert_eq!(c.recv().await.0, 0x70);
+    c.send(0x11, vec![expect(now as i64)]).await;
+    assert_eq!(c.recv().await.0, 0x70);
+    c.query("CREATE (:Probe {id: 'fresh'})", Pack::Null).await;
+    let (sig, f) = commit(&mut c).await;
+    assert_eq!(sig, 0x70, "{f:?}");
+    let (records, _) = c.query("MATCH (p:Probe) RETURN p.id", Pack::Null).await;
+    assert_eq!(records, vec![vec![Pack::Str("fresh".into())]]);
 }
 
 #[tokio::test]

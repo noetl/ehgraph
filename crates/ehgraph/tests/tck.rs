@@ -853,10 +853,20 @@ fn static_oom(sc: &Scenario) -> Option<String> {
     if has_multi_label(&q) || has_multi_label(&strip_strings(&expected)) {
         return Some("multiple labels per node".into());
     }
-    if has_id_property(&q) || has_id_property(&strip_strings(&expected)) {
-        return Some("reserved `id` property".into());
-    }
     None
+}
+
+/// The scenario uses a property literally named `id`, which ehgraph reserves for
+/// the element id. Not an exclusion: failures are only tagged with it.
+fn uses_id_property(sc: &Scenario) -> bool {
+    sc.steps.iter().any(|s| {
+        s.doc
+            .as_deref()
+            .is_some_and(|d| has_id_property(&strip_strings(d)))
+            || s.table
+                .iter()
+                .any(|r| has_id_property(&strip_strings(&r.join(" | "))))
+    })
 }
 
 /// Replace string literal contents with `_` so rules do not fire inside strings.
@@ -1351,7 +1361,11 @@ fn opencypher_tck() {
             }
             Status::Fail(r) => {
                 fail += 1;
-                ("fail", r.clone())
+                if uses_id_property(sc) {
+                    ("fail", format!("[uses `id` property] {r}"))
+                } else {
+                    ("fail", r.clone())
+                }
             }
             Status::Oom(r) => {
                 oom += 1;

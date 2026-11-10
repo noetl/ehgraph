@@ -81,7 +81,7 @@ fn single(clauses: &mut [Clause]) -> Result<(), CypherError> {
                     bind_match(part, &mut scope)?;
                 }
                 if let Some(w) = where_ {
-                    expr(w, &scope)?;
+                    where_expr(w, &scope)?;
                 }
             }
             Clause::Unwind { expr: e, alias } => {
@@ -296,8 +296,61 @@ fn projected_only(
     }
 }
 
-/// An expression outside a projection: no aggregates allowed.
+fn pattern_names(part: &PatternPart) -> Vec<&String> {
+    let nodes = std::iter::once(&part.start).chain(part.chain.iter().map(|(_, n)| n));
+    nodes
+        .filter_map(|n| n.var.as_ref())
+        .chain(part.chain.iter().filter_map(|(r, _)| r.var.as_ref()))
+        .chain(part.path_var.iter())
+        .collect()
+}
+
+/// A bare pattern `(a)-->(b)` is a predicate: allowed only where a boolean is
+/// expected (a WHERE, under AND/OR/XOR/NOT) or as the argument of `exists()`.
+fn pattern_positions(e: &Expr, ok: bool) -> Result<(), CypherError> {
+    match e {
+        Expr::Exists {
+            subquery: false, ..
+        } if !ok => Err(CypherError::syntax(
+            "a pattern expression is only allowed as a predicate (in WHERE or exists())",
+        )),
+        Expr::Exists { where_, .. } => where_.iter().try_for_each(|w| pattern_positions(w, true)),
+        Expr::Binary(BinOp::And | BinOp::Or | BinOp::Xor, a, b) => {
+            pattern_positions(a, ok)?;
+            pattern_positions(b, ok)
+        }
+        Expr::Unary(UnOp::Not, a) => pattern_positions(a, ok),
+        Expr::Func { name, args, .. }
+            if name == "exists" && matches!(args.as_slice(), [Expr::Exists { .. }]) =>
+        {
+            pattern_positions(&args[0], true)
+        }
+        _ => {
+            let mut res = Ok(());
+            children(e, &mut |c| {
+                if res.is_ok() {
+                    res = pattern_positions(c, false);
+                }
+            });
+            res
+        }
+    }
+}
+
+/// A WHERE predicate: pattern predicates allowed, aggregates not.
+fn where_expr(e: &Expr, scope: &Scope) -> Result<(), CypherError> {
+    pattern_positions(e, true)?;
+    no_agg_vars(e, scope)
+}
+
+/// An expression outside a projection and outside WHERE.
 fn expr(e: &Expr, scope: &Scope) -> Result<(), CypherError> {
+    pattern_positions(e, false)?;
+    no_agg_vars(e, scope)
+}
+
+/// No aggregates allowed; variables must be defined.
+fn no_agg_vars(e: &Expr, scope: &Scope) -> Result<(), CypherError> {
     if e.contains_aggregate() {
         return Err(invalid_aggregation(
             "aggregate functions are only allowed in RETURN and WITH projections",
@@ -331,13 +384,29 @@ fn agg_structure(e: &Expr, inside: bool) -> Result<(), CypherError> {
         return Ok(());
     }
     match e {
-        Expr::ListComp { .. } | Expr::Quantifier { .. } => {
-            if e.contains_aggregate() {
+        // The list may be an aggregate (`[x IN collect(r) WHERE …]`); the
+        // per-element predicate and projection may not.
+        Expr::ListComp {
+            list, pred, proj, ..
+        } => {
+            if pred
+                .iter()
+                .chain(proj.iter())
+                .any(|x| x.contains_aggregate())
+            {
                 return Err(invalid_aggregation(
                     "aggregates cannot be used inside list comprehensions or quantifiers",
                 ));
             }
-            Ok(())
+            agg_structure(list, inside)
+        }
+        Expr::Quantifier { list, pred, .. } => {
+            if pred.contains_aggregate() {
+                return Err(invalid_aggregation(
+                    "aggregates cannot be used inside list comprehensions or quantifiers",
+                ));
+            }
+            agg_structure(list, inside)
         }
         _ => {
             // Walk direct children with the same rule.
@@ -409,6 +478,7 @@ fn projection(p: &Projection, scope: &Scope) -> Result<Scope, CypherError> {
         .chain(p.order.iter().map(|(e, _)| e))
     {
         agg_structure(e, false)?;
+        pattern_positions(e, false)?;
     }
     let aggregating = p.items.iter().any(|(e, _)| e.contains_aggregate());
     if !aggregating && p.order.iter().any(|(e, _)| e.contains_aggregate()) {
@@ -444,7 +514,7 @@ fn projection(p: &Projection, scope: &Scope) -> Result<Scope, CypherError> {
         }
     }
     if let Some(w) = &p.where_ {
-        expr(w, &both)?;
+        where_expr(w, &both)?;
     }
     for e in p.skip.iter().chain(p.limit.iter()) {
         expr(e, &Scope::new())?;
@@ -512,12 +582,24 @@ fn vars(e: &Expr, scope: &Scope) -> Result<(), CypherError> {
         }
         // Variables introduced inside an existential pattern or a pattern
         // comprehension are local to it.
-        Expr::Exists { patterns, where_ } => {
+        Expr::Exists {
+            patterns,
+            where_,
+            subquery,
+        } => {
+            // A bare pattern predicate cannot introduce new variables.
+            if !subquery {
+                for part in patterns {
+                    for v in pattern_names(part) {
+                        defined(v, scope)?;
+                    }
+                }
+            }
             let mut inner = scope.clone();
             for part in patterns {
                 bind_match(part, &mut inner)?;
             }
-            where_.iter().try_for_each(|w| expr(w, &inner))
+            where_.iter().try_for_each(|w| where_expr(w, &inner))
         }
         Expr::PatternComp { part, pred, proj } => {
             let mut inner = scope.clone();

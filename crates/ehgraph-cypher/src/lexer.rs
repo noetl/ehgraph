@@ -113,22 +113,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CypherError> {
                 pos: tp,
             })
         };
-        // `.5` is a float unless the dot is a property access (`n.x`) or a range.
+        // `.5` is a float unless the dot directly follows a name, a literal or a
+        // closing bracket (a property access such as `n.x`).
         let leading_dot = c == '.'
             && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())
-            && !matches!(
-                out.last().map(|t: &Token| &t.tok),
-                Some(
-                    Tok::Ident { .. }
-                        | Tok::RParen
-                        | Tok::RBracket
-                        | Tok::RBrace
-                        | Tok::Param(_)
-                        | Tok::Int(_)
-                        | Tok::Float(_)
-                        | Tok::Str(_)
-                )
-            );
+            && (i == 0 || {
+                let prev = chars[i - 1];
+                !(prev.is_alphanumeric() || "_)]}`'\"".contains(prev))
+            });
         if c.is_ascii_digit() || leading_dot {
             let start = i;
             let radix = match (c, chars.get(i + 1)) {

@@ -821,6 +821,7 @@ impl Parser {
                     return Ok(Expr::Exists {
                         patterns: vec![part],
                         where_: None,
+                        subquery: false,
                     });
                 }
                 self.bump();
@@ -927,7 +928,11 @@ impl Parser {
                                 ));
                             }
                             self.bump();
-                            return Ok(Expr::Exists { patterns, where_ });
+                            return Ok(Expr::Exists {
+                                patterns,
+                                where_,
+                                subquery: true,
+                            });
                         }
                         _ => {}
                     }

@@ -205,6 +205,8 @@ pub enum Expr {
     Exists {
         patterns: Vec<PatternPart>,
         where_: Option<Box<Expr>>,
+        /// `EXISTS { … }` (may introduce variables) rather than a bare pattern.
+        subquery: bool,
     },
     /// Pattern comprehension `[(a)-->(b) WHERE pred | proj]`.
     PatternComp {

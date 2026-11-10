@@ -2228,7 +2228,9 @@ impl Exec<'_, '_> {
                     "count(*) is only allowed in RETURN or WITH",
                 ))
             }
-            Expr::Exists { patterns, where_ } => {
+            Expr::Exists {
+                patterns, where_, ..
+            } => {
                 let mut found = Vec::new();
                 self.match_parts(patterns, 0, row.clone(), Vec::new(), &mut found)?;
                 for r in found {

@@ -193,7 +193,10 @@ impl SessionGraph {
                     continue;
                 }
                 edges.push(edge.clone());
-                if seen.insert(dst, depth + 1).is_none() {
+                // Never overwrite a known depth: a seed reached from another seed
+                // keeps depth 0, or its own out-edges are skipped (noetl/ehgraph#20).
+                if let std::collections::hash_map::Entry::Vacant(slot) = seen.entry(dst) {
+                    slot.insert(depth + 1);
                     nodes.push(self.nodes[dst as usize].clone());
                     frontier.push_back(dst);
                 }

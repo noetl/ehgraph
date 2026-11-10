@@ -5,6 +5,7 @@ Every instance exposes the same tools. You choose the domain by which server you
 - MCP: `POST /mcp` with JSON-RPC 2.0. Methods: `initialize`, `ping`, `tools/list`, `tools/call`.
 - HTTP: `POST /v1/tools/{tool}` with the tool arguments as a JSON object. `{tool}` is one path segment, so `graph.upsert` is valid.
 - Discovery: `GET /mcp/tools`.
+- Cypher: `POST /v1/cypher`, `POST /db/{namespace}/query/v2` (Neo4j Query API shape), and an optional Bolt listener. See [Cypher](Cypher).
 - Health: `GET /healthz`.
 - Metrics: `GET /metrics` (Prometheus text).
 - Operator ship: `POST /v1/admin/backup` (requires an operator grant, `namespace = "*"`).
@@ -55,6 +56,7 @@ Read tools take `namespace` and either `graph_session_id` or `version`. With a s
 | `graph.deactivate` | `ids`, or `{source, not_seen_since}` plus optional `origin`. Soft-deactivate. |
 | `graph.snapshot.create` | Arrow IPC snapshot at the current head. `scope` defaults to full. |
 | `graph.node` / `graph.edge` | One element by `id`. |
+| `graph.cypher` | openCypher subset: read and write. `query`, `params`, optional `active`, `version`/`graph_session_id` (read only), `source`, `idempotency_key`. Writes commit through `graph.upsert` + `graph.deactivate`. See [Cypher](Cypher). |
 | `graph.query` | Nodes by `type`, `origin`, `props`, `active` (`true`, `false`, or `"any"`). `props` values are equality, or `{gte, gt, lte, lt}`. |
 | `graph.neighbors` | `node_id`, `direction` (`out`, `in`, `both`), optional `edge_type`. |
 | `graph.subgraph` | Directed k-hop from `seeds`. Optional `edge_types` and `max_nodes`. |

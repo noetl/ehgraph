@@ -23,6 +23,8 @@ Lifecycle playbooks are shared and read `workload.mcp_resource`, which the NoETL
 
 Session: `graph.session.open`, `graph.session.refresh`, `graph.session.close`, `graph.session.info`, `graph.session.list`.
 
+Query language: `graph.cypher` (openCypher subset, reads and writes; see [Cypher](Cypher)).
+
 Read: `graph.node`, `graph.edge`, `graph.query`, `graph.neighbors`, `graph.subgraph`, `graph.path`, `graph.snapshot.info`.
 
 Write: `graph.upsert`, `graph.deactivate`, `graph.snapshot.create`. Rejected with `READ_ONLY_SESSION` when `graph_session_id` is set.

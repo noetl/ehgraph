@@ -30,7 +30,7 @@ Revisit sharding only with a measured domain that does not fit on one machine.
 
 ## Not in this release
 
-- A query language (openCypher, GQL). The fixed tools are the API.
+- Full openCypher / GQL. A practical openCypher subset (reads, `CREATE`/`MERGE`/`SET`/`DELETE`, variable-length paths), the Neo4j Query API shape and a basic Bolt listener shipped on 2026-11-10. The fixed tools remain the stable API. Gap table and next steps: [Cypher](Cypher).
 - A NoETL `kind: graph` tool. Consumers use `kind: mcp`.
 - Session-local what-if edits.
 - Sharing one memory copy across sessions.

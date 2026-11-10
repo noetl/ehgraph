@@ -40,6 +40,7 @@
 //!   routes are mounted on the host's listener, not a loopback-only port.
 
 mod auth;
+pub mod bolt;
 pub mod budgets;
 mod config;
 mod http;
@@ -60,7 +61,7 @@ pub use config::{
     AuthConfig, BudgetConfig, Budgets, EmbeddedConfig, Grant, GraphConfig, SessionConfig,
     StoreSection,
 };
-pub use ehgraph_api::{Caller, ToolSpec};
+pub use ehgraph_api::{Caller, CypherRun, ToolSpec};
 pub use ehgraph_backup::{
     restore, Backup, Checkpoint, ObjectStore, TargetConfig as BackupTargetConfig, TokenProvider,
 };
@@ -268,6 +269,16 @@ impl EhGraph {
             .read()
             .map(|guard| guard.is_some())
             .unwrap_or(false)
+    }
+
+    /// Run a `graph.cypher` request as `caller`, returning typed rows.
+    pub fn cypher_as(
+        &self,
+        caller: &Caller,
+        args: &Value,
+    ) -> Result<ehgraph_api::CypherRun, EhError> {
+        self.engine()?
+            .run_cypher(args, caller, ehgraph_core::now_ms())
     }
 
     fn engine(&self) -> Result<Arc<Engine>, EhError> {

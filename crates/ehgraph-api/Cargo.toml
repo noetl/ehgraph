@@ -11,6 +11,7 @@ description = "Tool operations over the durable store or a session graph"
 ehgraph-core = { workspace = true }
 ehgraph-store = { workspace = true }
 ehgraph-memory = { workspace = true }
+ehgraph-cypher = { workspace = true }
 ehgraph-backup = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

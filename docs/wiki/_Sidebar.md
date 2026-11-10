@@ -6,6 +6,7 @@
 - [Embedding](Embedding)
 - [API and MCP](API-and-MCP)
 - [Tool contract](Tool-Contract)
+- [Cypher (openCypher/GQL, Bolt)](Cypher)
 - [Operations](Operations)
 - [Developer Guide](Developer-Guide)
 - [Roadmap](Roadmap)

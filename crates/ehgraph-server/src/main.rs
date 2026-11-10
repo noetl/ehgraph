@@ -50,10 +50,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Serve { config } => {
             let cfg = Config::load(&config)?;
             let listen = cfg.listen_addr()?;
+            let bolt = cfg.bolt.clone();
             let running = boot(cfg)?;
             let identity = running.graph.identity().clone();
             tracing::info!(%listen, instance_id = %identity.instance_id, domain = %identity.domain, "ehgraph serving");
             running.graph.start_maintenance()?;
+            if let Some(bolt) = bolt {
+                let addr = bolt.listen_addr()?;
+                let bolt_listener = TcpListener::bind(addr).await?;
+                tracing::info!(%addr, "bolt listening");
+                let options = ehgraph::bolt::BoltOptions {
+                    default_namespace: bolt.default_namespace,
+                };
+                tokio::spawn(ehgraph::bolt::serve(
+                    running.graph.clone(),
+                    bolt_listener,
+                    options,
+                ));
+            }
             let listener = TcpListener::bind(listen).await?;
             serve(listener, running.router)
                 .with_graceful_shutdown(async {

@@ -6,6 +6,7 @@ members = [
     "crates/ehgraph-store",
     "crates/ehgraph-backup",
     "crates/ehgraph-memory",
+    "crates/ehgraph-cypher",
     "crates/ehgraph-api",
     "crates/ehgraph-server",
 ]
@@ -23,6 +24,7 @@ ehgraph-core = { path = "crates/ehgraph-core" }
 ehgraph-store = { path = "crates/ehgraph-store" }
 ehgraph-backup = { path = "crates/ehgraph-backup" }
 ehgraph-memory = { path = "crates/ehgraph-memory" }
+ehgraph-cypher = { path = "crates/ehgraph-cypher" }
 ehgraph-api = { path = "crates/ehgraph-api" }
 ehgraph = { path = "crates/ehgraph" }
 serde = { version = "1", features = ["derive"] }

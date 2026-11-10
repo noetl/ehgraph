@@ -90,6 +90,22 @@ impl SessionGraph {
             .map(|ord| &self.edges[*ord as usize])
     }
 
+    /// Active outgoing edges of an active node (empty for an unknown id).
+    pub fn out_edges(&self, id: &str) -> Vec<&Edge> {
+        match self.node_index.get(id) {
+            Some(&ord) => self.csr_edges(&self.out_offsets, &self.out_edges, ord),
+            None => Vec::new(),
+        }
+    }
+
+    /// Active incoming edges of an active node (empty for an unknown id).
+    pub fn in_edges(&self, id: &str) -> Vec<&Edge> {
+        match self.node_index.get(id) {
+            Some(&ord) => self.csr_edges(&self.in_offsets, &self.in_edges, ord),
+            None => Vec::new(),
+        }
+    }
+
     pub fn query(&self, query: &NodeQuery) -> Page<Node> {
         let mut matched: Vec<&Node> = self
             .nodes

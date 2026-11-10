@@ -17,8 +17,30 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default = "default_listen")]
     pub listen: String,
+    /// Optional Bolt listener (off unless the section is present).
+    #[serde(default)]
+    pub bolt: Option<BoltConfig>,
     #[serde(flatten)]
     pub graph: GraphConfig,
+}
+
+/// `[bolt]`: serve the Bolt protocol so Neo4j drivers can run Cypher.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BoltConfig {
+    /// e.g. "127.0.0.1:7687". Plaintext; keep it on loopback or behind TLS.
+    pub listen: String,
+    /// Namespace used when a client opens a session without `database=`.
+    #[serde(default)]
+    pub default_namespace: Option<String>,
+}
+
+impl BoltConfig {
+    pub fn listen_addr(&self) -> Result<SocketAddr, EhError> {
+        self.listen
+            .parse()
+            .map_err(|err| EhError::invalid(format!("bolt.listen {}: {err}", self.listen)))
+    }
 }
 
 fn default_listen() -> String {
@@ -37,6 +59,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), EhError> {
         self.graph.validate()?;
         self.listen_addr()?;
+        if let Some(bolt) = &self.bolt {
+            bolt.listen_addr()?;
+        }
         Ok(())
     }
 

@@ -221,11 +221,164 @@ fn writes_produce_net_changes_only() {
 #[test]
 fn errors_are_typed() {
     assert!(err("MATCH (n) RETURN").starts_with("cypher syntax"));
-    assert!(err("MATCH (n) RETURN n UNION RETURN 1").starts_with("cypher unsupported"));
+    assert!(err("MATCH (n) RETURN n UNION RETURN 1").contains("same column names"));
     assert!(err("CALL db.labels()").starts_with("cypher unsupported"));
     assert!(err("RETURN nosuch(1)").starts_with("cypher unsupported"));
     assert!(err("RETURN x").contains("not defined"));
     assert!(err("RETURN 1 + 'a' - 1").starts_with("cypher type"));
     assert!(err("MATCH (n) RETURN n.v AS a, n.v AS a").contains("multiple result columns"));
     assert!(err("MATCH (n)").contains("must end with RETURN"));
+}
+
+#[test]
+fn union_and_union_all() {
+    assert_eq!(
+        run("RETURN 1 AS x UNION RETURN 1 AS x UNION RETURN 2 AS x"),
+        vec![json!([1]), json!([2])]
+    );
+    assert_eq!(
+        run("RETURN 1 AS x UNION ALL RETURN 1 AS x"),
+        vec![json!([1]), json!([1])]
+    );
+    assert_eq!(
+        run("MATCH (n:N) RETURN n.v AS v UNION MATCH (m:M) RETURN m.v AS v"),
+        vec![json!([1]), json!([2]), json!([2.5])]
+    );
+    assert!(err("RETURN 1 AS a UNION RETURN 1 AS b").contains("same column names"));
+    assert!(
+        err("RETURN 1 AS a UNION RETURN 1 AS a UNION ALL RETURN 1 AS a")
+            .starts_with("cypher syntax")
+    );
+}
+
+#[test]
+fn rand_is_a_float_in_unit_interval() {
+    let rows = run("UNWIND range(1, 50) AS i RETURN rand() AS r");
+    assert_eq!(rows.len(), 50);
+    let vals: Vec<f64> = rows.iter().map(|r| r[0].as_f64().unwrap()).collect();
+    assert!(vals.iter().all(|v| (0.0..1.0).contains(v)));
+    assert!(vals.windows(2).any(|w| w[0] != w[1]));
+    // An aggregate over rand() is rejected before anything runs (TCK Return6 [15]).
+    assert!(err("RETURN count(rand())").contains("non-constant expression"));
+    assert!(err("UNWIND [1, 2] AS x RETURN sum(x + rand())").contains("non-constant"));
+    // rand() outside an aggregate, or an aggregate next to it, is fine.
+    assert_eq!(
+        run("RETURN count(*) AS n, rand() < 1.0 AS ok"),
+        vec![json!([1, true])]
+    );
+}
+
+#[test]
+fn static_variable_checks() {
+    // Undefined variables are rejected even when no row would reach them.
+    assert!(err("MATCH (n:Nope) RETURN x").contains("not defined"));
+    assert!(err("MATCH (n:Nope) WITH n.v AS v RETURN n").contains("not defined"));
+    assert!(err("MATCH (n:Nope) SET m.v = 1").contains("not defined"));
+    assert!(err("UNWIND [1] AS x RETURN y").contains("not defined"));
+    // Comprehension variables are local.
+    assert_eq!(
+        run("RETURN [x IN [1, 2] | x * 2] AS l"),
+        vec![json!([[2, 4]])]
+    );
+    assert!(err("RETURN [x IN [1] | x] AS l, x").contains("not defined"));
+    // A variable keeps one kind.
+    assert!(err("MATCH ()-[r]->() MATCH (r) RETURN r").contains("cannot be used as"));
+    assert!(err("MATCH (n) MATCH ()-[n]->() RETURN n").contains("cannot be used as"));
+    assert!(err("WITH 1 AS n MATCH (n) RETURN n").contains("cannot be used as"));
+    assert!(err("MATCH p = ()-->() MATCH (p) RETURN p").contains("cannot be used as"));
+    // Rebinding.
+    assert!(err("MATCH (a) CREATE (a:N) RETURN a").contains("already bound"));
+    assert!(err("MATCH (a)-[r]->(b) CREATE (a)-[r:R]->(b)").contains("already bound"));
+    assert!(err("MATCH (a) MERGE (a)").contains("already bound"));
+    assert!(
+        err("MATCH (n) MATCH p = ()-->() MATCH p = ()-->() RETURN p").contains("already bound")
+    );
+    // Valid reuse stays valid.
+    assert_eq!(
+        run("MATCH (a {id: 'a'})-[r:R]->(b) MATCH (b)-[s:R]->(c) RETURN c.id"),
+        vec![json!(["c"])]
+    );
+    assert_eq!(
+        run("MATCH (a {id: 'a'}) WITH a MATCH (a)-[:R]->(b) RETURN b.id"),
+        vec![json!(["b"])]
+    );
+    assert!(err("RETURN *").contains("no variables in scope"));
+}
+
+#[test]
+fn pattern_predicates_comprehensions_and_exists() {
+    // a -> b -> c -> a, c -> c (SELF)
+    assert_eq!(
+        run("MATCH (n:N) WHERE (n)-[:R]->(:M) RETURN n.id"),
+        vec![json!(["b"])]
+    );
+    assert_eq!(
+        run("MATCH (n) WHERE NOT (n)-[:SELF]->() RETURN n.id ORDER BY n.id"),
+        vec![json!(["a"]), json!(["b"])]
+    );
+    assert_eq!(
+        run("MATCH (n {id: 'c'}) RETURN exists((n)-[:R]->()) AS e"),
+        vec![json!([true])]
+    );
+    assert_eq!(
+        run("MATCH (n {id: 'c'}) RETURN [(n)-[:R|SELF]->(m) WHERE m.v > 1 | m.id] AS l"),
+        vec![json!([["c"]])]
+    );
+    assert_eq!(
+        run("MATCH (n) WHERE EXISTS { MATCH (n)-[:R]->(m) WHERE m.v = 1 } RETURN n.id"),
+        vec![json!(["c"])]
+    );
+    assert_eq!(
+        run("MATCH (n) WHERE exists { (n)<-[:R]-(:M) } RETURN n.id"),
+        vec![json!(["a"])]
+    );
+    // Parenthesized expressions still parse.
+    assert_eq!(
+        run("RETURN (1 + 2) * 3 AS x, (1) - (2) AS y"),
+        vec![json!([9, -1])]
+    );
+    // Variables introduced inside the pattern stay local.
+    assert!(err("MATCH (n) WHERE (n)-->(m) RETURN m").contains("not defined"));
+}
+
+#[test]
+fn literals_operators_and_with_where_scope() {
+    assert_eq!(
+        run("RETURN 0x1F AS h, -0x10 AS nh, 0o17 AS o, .5 AS f, -9223372036854775808 AS min"),
+        vec![json!([31, -16, 15, 0.5, i64::MIN])]
+    );
+    assert!(err("RETURN 9223372036854775808 AS x").starts_with("cypher syntax"));
+    assert!(err("RETURN 1e400 AS x").starts_with("cypher syntax"));
+    // `^` is left-associative; comparisons chain.
+    assert_eq!(run("RETURN 2 ^ 3 ^ 2 AS p"), vec![json!([64.0])]);
+    assert_eq!(
+        run("RETURN 1 < 2 < 3 AS a, 1 < 3 < 2 AS b"),
+        vec![json!([true, false])]
+    );
+    // NaN compares false.
+    assert_eq!(
+        run("WITH 0.0 / 0.0 AS nan RETURN nan > 1 AS a, nan < 1 AS b, nan >= nan AS c"),
+        vec![json!([false, false, false])]
+    );
+    // WITH ... WHERE sees variables from before the projection.
+    assert_eq!(
+        run("MATCH (a {id: 'a'})-[r:R]->(b) WITH b WHERE r IS NOT NULL RETURN b.id"),
+        vec![json!(["b"])]
+    );
+    // SET (n).k
+    let q = parse("MATCH (n {id: 'a'}) SET (n).w = 1").unwrap();
+    assert!(execute(&graph(), &q, &BTreeMap::new(), &ExecOptions::default()).is_ok());
+    // RETURN * has its columns even with no rows.
+    let q = parse("MATCH (n:Nope) WITH n, 1 AS one RETURN *").unwrap();
+    let out = execute(&graph(), &q, &BTreeMap::new(), &ExecOptions::default()).unwrap();
+    assert_eq!(out.columns, vec!["n", "one"]);
+    // Aggregation placement.
+    assert!(err("MATCH (n) WHERE count(n) > 1 RETURN n").contains("invalid aggregation"));
+    assert!(err("MATCH (n) RETURN n.v AS v ORDER BY count(*)").contains("invalid aggregation"));
+    assert!(err("RETURN count(count(*)) AS c").contains("invalid aggregation"));
+    assert!(err("MATCH (n) RETURN n.v AS v, count(*) AS c ORDER BY n.id").contains("not defined"));
+    assert_eq!(
+        run("MATCH (n) RETURN labels(n)[0] AS l, count(*) AS c ORDER BY labels(n)[0]"),
+        vec![json!(["M", 1]), json!(["N", 2])]
+    );
 }

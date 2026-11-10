@@ -16,6 +16,7 @@
 //! - the namespace is the graph; it is chosen by the request, not the query.
 
 mod ast;
+mod check;
 mod exec;
 mod lexer;
 mod parser;

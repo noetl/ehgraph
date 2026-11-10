@@ -113,45 +113,84 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CypherError> {
                 pos: tp,
             })
         };
-        if c.is_ascii_digit() {
+        // `.5` is a float unless the dot directly follows a name, a literal or a
+        // closing bracket (a property access such as `n.x`).
+        let leading_dot = c == '.'
+            && chars.get(i + 1).is_some_and(|d| d.is_ascii_digit())
+            && (i == 0 || {
+                let prev = chars[i - 1];
+                !(prev.is_alphanumeric() || "_)]}`'\"".contains(prev))
+            });
+        if c.is_ascii_digit() || leading_dot {
             let start = i;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            let mut is_float = false;
-            if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
-                is_float = true;
-                i += 1;
+            let radix = match (c, chars.get(i + 1)) {
+                ('0', Some('x' | 'X')) => 16,
+                ('0', Some('o' | 'O')) => 8,
+                _ => 10,
+            };
+            let magnitude: Option<u128> = if radix != 10 {
+                i += 2;
+                let digits = i;
+                while i < chars.len() && chars[i].is_alphanumeric() {
+                    i += 1;
+                }
+                let text: String = chars[digits..i].iter().collect();
+                col += i - start;
+                Some(
+                    u128::from_str_radix(&text, radix)
+                        .map_err(|_| err(tl, tc, "invalid integer literal"))?,
+                )
+            } else {
+                None
+            };
+            let tok = if let Some(m) = magnitude {
+                int_token(m, &mut out).ok_or_else(|| err(tl, tc, "integer literal out of range"))?
+            } else {
                 while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
                 }
-            }
-            if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
-                let mut j = i + 1;
-                if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
-                    j += 1;
-                }
-                if j < chars.len() && chars[j].is_ascii_digit() {
+                let mut is_float = false;
+                if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
                     is_float = true;
-                    i = j;
+                    i += 1;
                     while i < chars.len() && chars[i].is_ascii_digit() {
                         i += 1;
                     }
                 }
-            }
-            let text: String = chars[start..i].iter().collect();
-            col += i - start;
-            let tok = if is_float {
-                Tok::Float(
-                    text.parse()
-                        .map_err(|_| err(tl, tc, "invalid float literal"))?,
-                )
-            } else {
-                Tok::Int(
-                    text.parse()
-                        .map_err(|_| err(tl, tc, "integer literal out of range"))?,
-                )
+                if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
+                    let mut j = i + 1;
+                    if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+                        j += 1;
+                    }
+                    if j < chars.len() && chars[j].is_ascii_digit() {
+                        is_float = true;
+                        i = j;
+                        while i < chars.len() && chars[i].is_ascii_digit() {
+                            i += 1;
+                        }
+                    }
+                }
+                let text: String = chars[start..i].iter().collect();
+                col += i - start;
+                if is_float {
+                    let f: f64 = text
+                        .parse()
+                        .map_err(|_| err(tl, tc, "invalid float literal"))?;
+                    if !f.is_finite() {
+                        return Err(err(tl, tc, "float literal out of range"));
+                    }
+                    Tok::Float(f)
+                } else {
+                    let m: u128 = text
+                        .parse()
+                        .map_err(|_| err(tl, tc, "integer literal out of range"))?;
+                    int_token(m, &mut out)
+                        .ok_or_else(|| err(tl, tc, "integer literal out of range"))?
+                }
             };
+            if i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                return Err(err(tl, tc, "invalid number literal"));
+            }
             push(tok, &mut out);
             continue;
         }
@@ -300,4 +339,34 @@ pub fn lex(src: &str) -> Result<Vec<Token>, CypherError> {
         pos: chars.len(),
     });
     Ok(out)
+}
+
+/// An integer literal token. `2^63` only fits as `-9223372036854775808`: when the
+/// literal follows a unary minus, the minus is folded into the literal (a binary
+/// minus becomes `+`).
+fn int_token(magnitude: u128, out: &mut Vec<Token>) -> Option<Tok> {
+    if let Ok(i) = i64::try_from(magnitude) {
+        return Some(Tok::Int(i));
+    }
+    if magnitude != 1u128 << 63 || !matches!(out.last().map(|t| &t.tok), Some(Tok::Minus)) {
+        return None;
+    }
+    let binary = out.len() >= 2
+        && matches!(
+            out[out.len() - 2].tok,
+            Tok::Ident { .. }
+                | Tok::RParen
+                | Tok::RBracket
+                | Tok::RBrace
+                | Tok::Param(_)
+                | Tok::Int(_)
+                | Tok::Float(_)
+                | Tok::Str(_)
+        );
+    if binary {
+        out.last_mut().expect("checked").tok = Tok::Plus;
+    } else {
+        out.pop();
+    }
+    Some(Tok::Int(i64::MIN))
 }

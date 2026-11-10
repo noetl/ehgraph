@@ -5,12 +5,18 @@ use crate::value::Val;
 #[derive(Debug, Clone)]
 pub struct Query {
     pub clauses: Vec<Clause>,
+    /// Further single queries joined by `UNION` (`true` = `UNION ALL`).
+    pub unions: Vec<(bool, Vec<Clause>)>,
 }
 
 impl Query {
     /// True when any clause changes the graph.
     pub fn is_updating(&self) -> bool {
-        self.clauses.iter().any(|c| {
+        let mut all = self
+            .clauses
+            .iter()
+            .chain(self.unions.iter().flat_map(|(_, c)| c.iter()));
+        all.any(|c| {
             matches!(
                 c,
                 Clause::Create(_)
@@ -194,6 +200,20 @@ pub enum Expr {
         list: Box<Expr>,
         pred: Box<Expr>,
     },
+    /// Existential pattern: a pattern predicate `(a)-->(b)`, `exists((a)-->())`,
+    /// or `EXISTS { [MATCH] pattern [WHERE pred] }`. True when at least one match.
+    Exists {
+        patterns: Vec<PatternPart>,
+        where_: Option<Box<Expr>>,
+        /// `EXISTS { … }` (may introduce variables) rather than a bare pattern.
+        subquery: bool,
+    },
+    /// Pattern comprehension `[(a)-->(b) WHERE pred | proj]`.
+    PatternComp {
+        part: Box<PatternPart>,
+        pred: Option<Box<Expr>>,
+        proj: Box<Expr>,
+    },
     /// Slot of a computed aggregate, after projection planning.
     AggRef(usize),
 }
@@ -249,7 +269,12 @@ impl Expr {
             Expr::Quantifier { list, pred, .. } => {
                 list.contains_aggregate() || pred.contains_aggregate()
             }
-            Expr::Lit(_) | Expr::Param(_) | Expr::Var(_) | Expr::AggRef(_) => false,
+            Expr::Lit(_)
+            | Expr::Param(_)
+            | Expr::Var(_)
+            | Expr::AggRef(_)
+            | Expr::Exists { .. }
+            | Expr::PatternComp { .. } => false,
         }
     }
 }

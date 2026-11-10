@@ -228,6 +228,7 @@ fn execute_with(
         budget: Cell::new(opts.max_rows.saturating_mul(10).max(1000)),
         rand: RandomState::new(),
         seq: 0,
+        rng: Cell::new(0),
         pending_delete_checks: Vec::new(),
     };
     let result = run(&mut ex, query);
@@ -238,114 +239,25 @@ fn execute_with(
 }
 
 fn run(ex: &mut Exec<'_, '_>, query: &Query) -> Result<Outcome, CypherError> {
-    let mut rows: Vec<Row> = vec![Row::new()];
-    let mut columns = Vec::new();
-    let mut returned = false;
-    for clause in &query.clauses {
-        rows = match clause {
-            Clause::Match {
-                optional,
-                patterns,
-                where_,
-            } => ex.match_clause(rows, *optional, patterns, where_.as_ref())?,
-            Clause::Unwind { expr, alias } => {
-                let mut out = Vec::new();
-                for row in rows {
-                    match ex.eval(expr, &row, None)? {
-                        Val::Null => {}
-                        Val::List(items) => {
-                            for item in items {
-                                let mut r = row.clone();
-                                r.insert(alias.clone(), item);
-                                out.push(r);
-                            }
-                        }
-                        other => {
-                            let mut r = row.clone();
-                            r.insert(alias.clone(), other);
-                            out.push(r);
-                        }
-                    }
-                    ex.check_rows(out.len())?;
-                }
-                out
-            }
-            Clause::With(p) => ex.project(rows, p)?.1,
-            Clause::Return(p) => {
-                let (cols, out) = ex.project(rows, p)?;
-                columns = cols;
-                returned = true;
-                out
-            }
-            Clause::Create(parts) => {
-                let mut out = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let mut r = row;
-                    for part in parts {
-                        r = ex.create_part(part, r, false)?;
-                    }
-                    out.push(r);
-                }
-                out
-            }
-            Clause::Merge {
-                part,
-                on_create,
-                on_match,
-            } => {
-                let mut out = Vec::new();
-                for row in rows {
-                    let found = ex.match_part(part, &row, &[])?;
-                    if found.is_empty() {
-                        let mut r = ex.create_part(part, row, true)?;
-                        ex.apply_set(on_create, &mut r)?;
-                        out.push(r);
-                    } else {
-                        for (mut r, _) in found {
-                            ex.apply_set(on_match, &mut r)?;
-                            out.push(r);
-                        }
-                    }
-                    ex.check_rows(out.len())?;
-                }
-                out
-            }
-            Clause::Set(items) => {
-                let mut out = Vec::with_capacity(rows.len());
-                for mut row in rows {
-                    ex.apply_set(items, &mut row)?;
-                    out.push(row);
-                }
-                out
-            }
-            Clause::Remove(items) => {
-                for row in &rows {
-                    for item in items {
-                        match item {
-                            RemoveItem::Prop { var, key } => {
-                                let target = ex.lookup(var, row)?;
-                                ex.set_prop(&target, key, Val::Null)?;
-                            }
-                            RemoveItem::Labels { .. } => {
-                                return Err(CypherError::unsupported(
-                                    "REMOVE n:Label (ehgraph nodes carry exactly one label)",
-                                ))
-                            }
-                        }
-                    }
-                }
-                rows
-            }
-            Clause::Delete { detach, exprs } => {
-                for row in &rows {
-                    for e in exprs {
-                        let v = ex.eval(e, row, None)?;
-                        ex.delete(v, *detach)?;
-                    }
-                }
-                rows
-            }
-        };
+    let (columns, mut rows, returned) = ex.run_clauses(&query.clauses)?;
+    for (all, part) in &query.unions {
+        let (cols, more, _) = ex.run_clauses(part)?;
+        if cols != columns {
+            return Err(CypherError::semantic(
+                "all queries in a UNION must return the same column names",
+            ));
+        }
+        rows.extend(more);
+        if !*all {
+            let mut seen = HashSet::new();
+            rows.retain(|row| {
+                let k: Vec<String> = columns
+                    .iter()
+                    .map(|c| key(row.get(c).unwrap_or(&Val::Null)))
+                    .collect();
+                seen.insert(k)
+            });
+        }
         ex.check_rows(rows.len())?;
     }
     ex.verify_deletes()?;
@@ -368,6 +280,127 @@ fn run(ex: &mut Exec<'_, '_>, query: &Query) -> Result<Outcome, CypherError> {
         stats: std::mem::take(&mut ex.stats),
         changes,
     })
+}
+
+impl Exec<'_, '_> {
+    /// Run one single query (no UNION): returns its columns, rows, and whether it
+    /// ended in RETURN.
+    fn run_clauses(
+        &mut self,
+        clauses: &[Clause],
+    ) -> Result<(Vec<String>, Vec<Row>, bool), CypherError> {
+        let mut rows: Vec<Row> = vec![Row::new()];
+        let mut columns = Vec::new();
+        let mut returned = false;
+        for clause in clauses {
+            rows = match clause {
+                Clause::Match {
+                    optional,
+                    patterns,
+                    where_,
+                } => self.match_clause(rows, *optional, patterns, where_.as_ref())?,
+                Clause::Unwind { expr, alias } => {
+                    let mut out = Vec::new();
+                    for row in rows {
+                        match self.eval(expr, &row, None)? {
+                            Val::Null => {}
+                            Val::List(items) => {
+                                for item in items {
+                                    let mut r = row.clone();
+                                    r.insert(alias.clone(), item);
+                                    out.push(r);
+                                }
+                            }
+                            other => {
+                                let mut r = row.clone();
+                                r.insert(alias.clone(), other);
+                                out.push(r);
+                            }
+                        }
+                        self.check_rows(out.len())?;
+                    }
+                    out
+                }
+                Clause::With(p) => self.project(rows, p)?.1,
+                Clause::Return(p) => {
+                    let (cols, out) = self.project(rows, p)?;
+                    columns = cols;
+                    returned = true;
+                    out
+                }
+                Clause::Create(parts) => {
+                    let mut out = Vec::with_capacity(rows.len());
+                    for row in rows {
+                        let mut r = row;
+                        for part in parts {
+                            r = self.create_part(part, r, false)?;
+                        }
+                        out.push(r);
+                    }
+                    out
+                }
+                Clause::Merge {
+                    part,
+                    on_create,
+                    on_match,
+                } => {
+                    let mut out = Vec::new();
+                    for row in rows {
+                        let found = self.match_part(part, &row, &[])?;
+                        if found.is_empty() {
+                            let mut r = self.create_part(part, row, true)?;
+                            self.apply_set(on_create, &mut r)?;
+                            out.push(r);
+                        } else {
+                            for (mut r, _) in found {
+                                self.apply_set(on_match, &mut r)?;
+                                out.push(r);
+                            }
+                        }
+                        self.check_rows(out.len())?;
+                    }
+                    out
+                }
+                Clause::Set(items) => {
+                    let mut out = Vec::with_capacity(rows.len());
+                    for mut row in rows {
+                        self.apply_set(items, &mut row)?;
+                        out.push(row);
+                    }
+                    out
+                }
+                Clause::Remove(items) => {
+                    for row in &rows {
+                        for item in items {
+                            match item {
+                                RemoveItem::Prop { var, key } => {
+                                    let target = self.lookup(var, row)?;
+                                    self.set_prop(&target, key, Val::Null)?;
+                                }
+                                RemoveItem::Labels { .. } => {
+                                    return Err(CypherError::unsupported(
+                                        "REMOVE n:Label (ehgraph nodes carry exactly one label)",
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                    rows
+                }
+                Clause::Delete { detach, exprs } => {
+                    for row in &rows {
+                        for e in exprs {
+                            let v = self.eval(e, row, None)?;
+                            self.delete(v, *detach)?;
+                        }
+                    }
+                    rows
+                }
+            };
+            self.check_rows(rows.len())?;
+        }
+        Ok((columns, rows, returned))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -668,6 +701,8 @@ struct Exec<'g, 'p> {
     budget: Cell<usize>,
     rand: RandomState,
     seq: u64,
+    /// Counter feeding `rand()`.
+    rng: Cell<u64>,
     pending_delete_checks: Vec<String>,
 }
 
@@ -1239,8 +1274,8 @@ impl Exec<'_, '_> {
         let columns: Vec<String> = items.iter().map(|(_, a)| a.clone()).collect();
         let aggregating = items.iter().any(|(e, _)| e.contains_aggregate());
 
-        // (projected row, sort keys)
-        let mut out: Vec<(Row, Vec<Val>)> = Vec::new();
+        // (projected row, sort keys, environment for WITH ... WHERE)
+        let mut out: Vec<(Row, Vec<Val>, Row)> = Vec::new();
         if !aggregating {
             for row in &rows {
                 let mut nr = Row::new();
@@ -1253,7 +1288,7 @@ impl Exec<'_, '_> {
                 for (e, _) in &p.order {
                     keys.push(self.eval(e, &env, None)?);
                 }
-                out.push((nr, keys));
+                out.push((nr, keys, env));
             }
         } else {
             let mut aggs = Vec::new();
@@ -1317,19 +1352,19 @@ impl Exec<'_, '_> {
                 for e in &order_plan {
                     keys.push(self.eval(e, &env, Some(&vals))?);
                 }
-                out.push((nr, keys));
+                out.push((nr, keys, env));
             }
         }
         if p.distinct {
             let mut seen = HashSet::new();
-            out.retain(|(r, _)| {
+            out.retain(|(r, _, _)| {
                 let k = key(&Val::List(columns.iter().map(|c| r[c].clone()).collect()));
                 seen.insert(k)
             });
         }
         if !p.order.is_empty() {
             let dirs: Vec<bool> = p.order.iter().map(|(_, asc)| *asc).collect();
-            out.sort_by(|(_, a), (_, b)| {
+            out.sort_by(|(_, a, _), (_, b, _)| {
                 for (i, asc) in dirs.iter().enumerate() {
                     let o = order(&a[i], &b[i]);
                     let o = if *asc { o } else { o.reverse() };
@@ -1349,20 +1384,16 @@ impl Exec<'_, '_> {
             Some(e) => Some(self.non_negative(e, &empty, "LIMIT")?),
             None => None,
         };
-        let mut rows_out: Vec<Row> = out
-            .into_iter()
-            .skip(skip)
-            .take(limit.unwrap_or(usize::MAX))
-            .map(|(r, _)| r)
-            .collect();
-        if let Some(w) = &p.where_ {
-            let mut kept = Vec::new();
-            for r in rows_out {
-                if self.eval(w, &r, None)?.truthy()? == Some(true) {
-                    kept.push(r);
+        // `WITH ... WHERE` sees the projected variables and, as in openCypher, the
+        // variables in scope before the projection.
+        let mut rows_out: Vec<Row> = Vec::new();
+        for (r, _, env) in out.into_iter().skip(skip).take(limit.unwrap_or(usize::MAX)) {
+            if let Some(w) = &p.where_ {
+                if self.eval(w, &env, None)?.truthy()? != Some(true) {
+                    continue;
                 }
             }
-            rows_out = kept;
+            rows_out.push(r);
         }
         Ok((columns, rows_out))
     }
@@ -2197,6 +2228,40 @@ impl Exec<'_, '_> {
                     "count(*) is only allowed in RETURN or WITH",
                 ))
             }
+            Expr::Exists {
+                patterns, where_, ..
+            } => {
+                let mut found = Vec::new();
+                self.match_parts(patterns, 0, row.clone(), Vec::new(), &mut found)?;
+                for r in found {
+                    let keep = match where_ {
+                        Some(w) => self.eval(w, &r, aggs)?.truthy()? == Some(true),
+                        None => true,
+                    };
+                    if keep {
+                        return Ok(Val::Bool(true));
+                    }
+                }
+                Val::Bool(false)
+            }
+            Expr::PatternComp { part, pred, proj } => {
+                let mut out = Vec::new();
+                for (r, _) in self.match_part(part, row, &[])? {
+                    if let Some(p) = pred {
+                        if self.eval(p, &r, aggs)?.truthy()? != Some(true) {
+                            continue;
+                        }
+                    }
+                    out.push(self.eval(proj, &r, aggs)?);
+                    self.check_rows(out.len())?;
+                }
+                Val::List(out)
+            }
+            Expr::Func { name, args, .. }
+                if name == "exists" && matches!(args.as_slice(), [Expr::Exists { .. }]) =>
+            {
+                self.eval(&args[0], row, aggs)?
+            }
             Expr::Func { name, args, .. } => {
                 if AGGREGATES.contains(&name.as_str()) {
                     return Err(CypherError::semantic(format!(
@@ -2247,8 +2312,13 @@ impl Exec<'_, '_> {
             BinOp::Eq => opt(equals(&a, &b)),
             BinOp::Ne => opt(equals(&a, &b).map(|x| !x)),
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let nan = |v: &Val| matches!(v, Val::Float(f) if f.is_nan());
+                let numeric = |v: &Val| matches!(v, Val::Int(_) | Val::Float(_));
                 if a.is_null() || b.is_null() {
                     Val::Null
+                } else if (nan(&a) || nan(&b)) && numeric(&a) && numeric(&b) {
+                    // NaN is comparable to numbers and every comparison is false.
+                    Val::Bool(false)
                 } else {
                     match compare(&a, &b) {
                         None => Val::Null,
@@ -2678,6 +2748,14 @@ impl Exec<'_, '_> {
                 arity(0)?;
                 Val::Int(self.opts.now_ms)
             }
+            "rand" => {
+                arity(0)?;
+                let n = self.rng.get().wrapping_add(1);
+                self.rng.set(n);
+                let mut h = self.rand.build_hasher();
+                h.write_u64(n);
+                Val::Float((h.finish() >> 11) as f64 / (1u64 << 53) as f64)
+            }
             "eh.active" | "eh.lastseen" | "eh.firstseen" | "eh.source" | "eh.version"
             | "eh.origin" | "eh.executionid" => {
                 arity(1)?;
@@ -2947,6 +3025,11 @@ fn rewrite_aggs(e: &Expr, aggs: &mut Vec<Expr>) -> Expr {
             list: Box::new(rw(list)),
             pred: Box::new(rw(pred)),
         },
-        Expr::Lit(_) | Expr::Param(_) | Expr::Var(_) | Expr::AggRef(_) => e.clone(),
+        Expr::Lit(_)
+        | Expr::Param(_)
+        | Expr::Var(_)
+        | Expr::AggRef(_)
+        | Expr::Exists { .. }
+        | Expr::PatternComp { .. } => e.clone(),
     }
 }

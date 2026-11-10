@@ -114,28 +114,34 @@ write without a write grant, and `READ_ONLY_SESSION` (403) for a write with `ver
 | Variable length `*`, `*n`, `*m..n`, `*..n`, `*m..`, `*0..` | ✅ | Trail semantics. Upper bound is capped at 16 hops (larger explicit bounds are rejected). Expansion has a work budget |
 | Named paths `p = (…)` | ✅ | `nodes(p)`, `relationships(p)`, `length(p)` |
 | `shortestPath(…)`, `allShortestPaths(…)` | ✅ | One relationship pattern, min length 0 or 1 |
-| `WITH` (projection, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`, `WHERE`) | ✅ | |
+| `WITH` (projection, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`, `WHERE`) | ✅ | `WITH … WHERE` also sees the variables in scope before the projection, as in openCypher |
 | `UNWIND` | ✅ | The batch-upsert idiom `UNWIND $rows AS r MERGE …` |
-| `RETURN` (`*`, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`) | ✅ | |
+| `RETURN` (`*`, aliases, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`) | ✅ | `RETURN *` columns are the variables in scope, sorted by name (also when there are no rows) |
 | Aggregation `count(*)`, `count/collect/sum/avg/min/max` (with `DISTINCT`) | ✅ | Implicit grouping keys, as in openCypher |
 | `CREATE` nodes, relationships, paths | ✅ | Exactly one label. Missing `id` is generated (`<label>:<hex>`). Existing active id → 409 (use `MERGE`) |
+| Nodes without a label (`CREATE ()`, `MERGE ({k: v})`) | ❌ | Every ehgraph node has a type. This is the largest single cause of TCK failures (§8): 391 scenarios create an unlabeled node in their setup or query |
 | `MERGE` (`ON CREATE SET`, `ON MATCH SET`) | ✅ | Matches the whole pattern, else creates it. Reactivates a deactivated id |
 | `SET n.k = v`, `SET n = map`, `SET n += map`, `SET n:Label` (same label only) | ✅ / ⚠️ | `null` removes. `id` is immutable. A second label is out of model |
 | `REMOVE n.k` | ✅ | `REMOVE n:Label` ❌ (single-label model) |
 | `DELETE`, `DETACH DELETE` | ✅ | **Soft** deactivation. Dangling check at end of query, as in Neo4j |
-| `UNION` / `UNION ALL` | ❌ TODO | |
-| `CALL` procedures, `CALL { subquery }`, `EXISTS { }`, `COUNT { }` | ❌ TODO | |
-| Pattern predicates in `WHERE` (`WHERE (a)-->(b)`) and pattern comprehensions | ❌ TODO | Use `OPTIONAL MATCH` + `count` |
+| `UNION` / `UNION ALL` | ✅ | Same column names required; `UNION` removes duplicate rows; mixing the two is a syntax error |
+| `EXISTS { [MATCH] pattern [WHERE …] }` | ✅ | Full subqueries inside `EXISTS { }` (`WITH`, `RETURN`, nested `MATCH` clauses) ❌ TODO |
+| `CALL` procedures, `CALL { subquery }`, `COUNT { }` | ❌ TODO | |
+| Pattern predicates (`WHERE (a)-[:T]->(b)`, `exists((a)-->())`) and pattern comprehensions `[(a)-->(b) WHERE … \| b.x]` | ✅ | A bare pattern is a predicate: only in `WHERE` (under `AND`/`OR`/`XOR`/`NOT`) or in `exists()`, and it cannot introduce new variables |
+| Compile-time checks | ✅ | Undefined variables, a variable reused as another kind (node / relationship / path / value), rebinding in `CREATE`/`MERGE`, a bound path variable, aggregates outside projections or nested, aggregate `ORDER BY` without an aggregating projection, and non-projected variables in `ORDER BY` after `DISTINCT` or aggregation. Reported as `cypher semantic error` (Neo4j: `SyntaxError`) before anything runs |
 | `FOREACH`, `LOAD CSV` | ❌ | Not planned (`UNWIND` covers batch writes) |
 | Multiple labels per node, label expressions `:A&B`, `:!A` | ❌ | Model has one type per node |
 | Parallel relationships of the same type between the same nodes | ⚠️ | Only with an explicit relationship `{id: …}` |
+| Mixed-direction relationship `<-[]->` | ❌ | A syntax error in ehgraph; the TCK reads it as undirected (3 scenarios) |
 | Schema DDL (`CREATE INDEX/CONSTRAINT`) | ❌ | Schema is `data_dir/schemas/<ns>.json` |
 | Multi-statement transactions | ✅ | `graph.tx.*`, Bolt BEGIN/COMMIT/ROLLBACK, Query API `/tx`. Snapshot reads + read-your-writes; one atomic, serializable commit (optimistic, first committer wins); conditional commits with `expect`. See [Transactions](Transactions) |
 
 ### Expressions and functions
 
-✅ literals (int, float, string, bool, null, list, map), `$params`, property access (nested
-maps too), `[i]`, `[a..b]`, `+ - * / % ^`, string `+`, list `+`, `= <> < <= > >=`, three-valued
+✅ literals (int, float, string, bool, null, list, map; hexadecimal `0x1F`, octal `0o17`, `.5`,
+`-9223372036854775808`), `$params`, property access (nested maps too), `[i]`, `[a..b]`,
+`+ - * / % ^` (`^` is left-associative), string `+`, list `+`, `= <> < <= > >=` (chained:
+`a < b < c` is `a < b AND b < c`; comparisons with `NaN` are `false`), three-valued
 `AND OR XOR NOT`, `IS [NOT] NULL`, `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `n:Label` tests,
 `CASE` (simple and searched), list comprehensions `[x IN l WHERE p | e]`, and `all/any/none/single(x IN l WHERE p)`.
 
@@ -143,15 +149,18 @@ Functions: `id`, `elementId`, `labels`, `type`, `properties`, `keys`, `startNode
 `nodes`, `relationships`, `length`, `size`, `coalesce`, `exists`, `head`, `last`, `tail`,
 `reverse`, `range`, `toLower`, `toUpper`, `trim`, `lTrim`, `rTrim`, `replace`, `split`,
 `substring`, `left`, `right`, `toString`, `toInteger`, `toFloat`, `toBoolean`, `abs`, `ceil`,
-`floor`, `round`, `sqrt`, `sign`, `timestamp`, and `eh.*` metadata.
+`floor`, `round`, `sqrt`, `sign`, `rand`, `timestamp`, and `eh.*` metadata.
 
 ❌ TODO: regular expressions (`=~`), temporal types and functions (`date()`, `datetime()`,
 `duration`; ehgraph timestamps are exposed as `$timestamp` values), spatial types, `reduce()`,
-string functions beyond the list above, and trigonometric and log functions.
+`percentileCont`/`percentileDisc`/`stDev`, string functions beyond the list above, and
+trigonometric and log functions. (The TCK at the pinned commit does not exercise `=~`, `reduce()`
+or the trigonometric functions; temporal types alone are 1,069 of its scenarios.)
 
 ### Semantics differences to know
 
 - `id(n)` returns the ehgraph **string** id, not Neo4j's integer.
+- `id` is the element id, not a property: `CREATE ({id: 1})` sets the element id `"1"`, so `n.id` reads back the string `'1'` and `properties(n)` has no `id`. TCK scenarios that use a property named `id` fail for this reason (§8).
 - `properties_set` counts properties that actually changed (Neo4j counts every `SET`), so an idempotent rerun reports 0.
 - A node that already has a property literally named `id` in `props` (written through `graph.upsert`) shows its element id through `n.id`. The prop is still visible via `properties(n)`.
 - Traversal follows active edges between active nodes. `active: false` affects which nodes `MATCH` can bind. It does not resurrect deactivated edges.
@@ -211,9 +220,141 @@ MERGE (n:Device {id: r.id}) SET n += r.props
 
 ## 7. Roadmap to fuller GQL / Bolt
 
-1. `UNION`, `EXISTS {}` / `COUNT {}` subqueries, pattern predicates, `=~`, `reduce()`.
+1. ~~`UNION`, pattern predicates~~: done. Full `EXISTS {}` / `COUNT {}` / `CALL {}` subqueries, `=~`, `reduce()`.
 2. GQL surface syntax alongside the Cypher forms: `INSERT`, `FILTER`, `LET`, quantified path patterns `((a)-[:T]->(b)){1,4}`, `ANY SHORTEST` / `ALL SHORTEST`, path modes (`TRAIL`, `ACYCLIC`).
-3. Run the openCypher TCK scenarios that fall within the single-label model, and publish the pass rate.
+3. ~~Run the openCypher TCK and publish the pass rate~~: done, §8. Next: decide whether unlabeled nodes get a model mapping (the largest TCK failure cause).
 4. ~~Conditional commit and multi-statement Bolt transactions~~: done, see [Transactions](Transactions). Next: property-granular conflict detection and server-side retry of explicit transactions.
 5. Bolt: TLS, 5.1+ (LOGON), and a routing table for single-instance `neo4j://`.
 6. Temporal types mapped to ehgraph timestamps, and secondary property indexes for large label scans.
+
+## 8. TCK conformance
+
+Run on 2026-11-10 against the openCypher TCK **2024.3**, commit
+[`677cbafabb8c3c5eed458fd3b1ec0daec8d67d23`](https://github.com/opencypher/openCypher/tree/677cbafabb8c3c5eed458fd3b1ec0daec8d67d23/tck/features)
+(Apache-2.0; the feature files are not vendored here). The scenario-level results are in
+[`tck-results.json`](tck-results.json).
+
+### Results
+
+| | Scenarios | Pass | Fail | Out of model | Pass rate, all scenarios | Pass rate, in-model |
+|---|---:|---:|---:|---:|---:|---:|
+| Before the fixes in this change (main at `9d97955`) | 3,896 | 1,844 | 882 | 1,170 | 47.3% | 67.6% |
+| After | 3,896 | **2,292** | 434 | 1,170 | **58.8%** | **84.1%** |
+
+"In-model" is pass / (pass + fail). One more scenario is tagged `@ignore` by the TCK itself and is
+not run. 391 of the 434 remaining failures are scenarios that create a node without a label
+(see the top causes below); without them the in-model pass rate would be 98.2%, but they are
+counted as failures because an unlabeled node is a gap, not a reason to exclude a scenario.
+
+### Reproduce
+
+```bash
+scripts/tck.sh [workdir]          # clones openCypher at the pinned commit, runs the ignored test
+EHGRAPH_TCK_FILTER=clauses/match scripts/tck.sh   # one directory
+```
+
+The runner is `crates/ehgraph/tests/tck.rs` (an `#[ignore]` test, so `cargo test --workspace`
+does not need the checkout). It drives the real path end to end: an in-process instance on a temp
+directory, `EhGraph::cypher_as` → `Engine::run_cypher` → the store commit, one fresh namespace per
+scenario. It writes `target/tck-results.json` (or `$EHGRAPH_TCK_OUT`).
+
+### How results are compared
+
+- **Values.** Nodes compare by label set and properties, relationships by type and properties,
+  paths by their sequence of nodes and relationships and each relationship's direction. ehgraph
+  element ids are identity, not properties, and are never compared. Integers and floats are
+  distinct (`1` ≠ `1.0`); floats compare exactly, `NaN` equals `NaN`. Column names must match.
+  `in any order` compares rows as a multiset; `ignoring element order for lists` compares lists
+  as multisets.
+- **Side effects** are a diff of the visible graph before and after the query, as the TCK defines
+  them: `±nodes` and `±relationships` by element id, `±properties` by (element, key, value),
+  `±labels` by the set of label names present in the graph. They are not taken from ehgraph's
+  `stats` (which count changed properties only). A soft-deleted element is gone from the visible
+  graph, so it counts as deleted.
+- **Empty graph.** Reads on a namespace that was never written are `NOT_FOUND` in ehgraph, and an
+  empty upsert is refused, so each scenario's namespace is created by upserting one sentinel node
+  and deactivating it. Deactivated elements are invisible to `MATCH`.
+- **Expected errors** pass when ehgraph raises an error of a mapped kind. The phase
+  (compile time or runtime) and the detail code are not checked:
+
+  | TCK error | Accepted ehgraph kinds |
+  |---|---|
+  | `SyntaxError` | `syntax`, `unsupported`, `semantic` (the TCK reports semantic analysis errors such as `UndefinedVariable` as `SyntaxError`); also `type` when the detail is `InvalidArgumentType` (a type check ehgraph makes at runtime) |
+  | `SemanticError` | `semantic`, `syntax` |
+  | `TypeError` | `type` |
+  | `ArgumentError` | `type`, `semantic`, `limit` |
+  | `ConstraintVerificationFailed` | `constraint` |
+  | `EntityNotFound` | `semantic`, `type`, `constraint` |
+  | `ParameterMissing` | `semantic`, `syntax` |
+
+  An `unsupported` error where the scenario expects success is a failure.
+
+### Out-of-model rules
+
+A scenario is excluded only when it needs something outside ehgraph's model. Each excluded
+scenario's rule is recorded in `tck-results.json`.
+
+| Rule | How it is detected | Scenarios |
+|---|---|---:|
+| Temporal and spatial types | A query calls `date`, `datetime`, `localdatetime`, `time`, `localtime`, `duration`, `point` or `distance` (also `datetime.truncate(…)` style) outside a string | 1,069 |
+| Procedures (`CALL proc`) | `CALL name…` in a query, or a `there exists a procedure` step. `CALL { subquery }` is not excluded | 52 |
+| Multiple labels per node | A node pattern or label test with two or more labels or a label expression (`:A:B`, `:A\|B`, `:A&B` on a node) in a query or in an expected row; or ehgraph rejects a statement for adding a second label | 44 |
+| Parallel relationships of one type | ehgraph rejects a `CREATE` because the same `(start, type, end)` relationship already exists (no explicit relationship id) | 5 |
+| Schema DDL | `CREATE`/`DROP` `INDEX`/`CONSTRAINT` | 0 |
+
+Not excluded, counted as failures: nodes without a label, properties named `id` (ehgraph's
+element id), `<-[]->`, row limits.
+
+### By directory
+
+| Directory | Scenarios | Pass | Fail | Out of model | In-model pass rate | Before |
+|---|---:|---:|---:|---:|---:|---:|
+| `clauses/call` | 52 | 0 | 0 | 52 | – | – |
+| `clauses/create` | 78 | 35 | 40 | 3 | 47% | 41% |
+| `clauses/delete` | 41 | 18 | 23 | 0 | 44% | 41% |
+| `clauses/match` | 381 | 332 | 44 | 5 | 88% | 26% |
+| `clauses/match-where` | 34 | 21 | 13 | 0 | 62% | 59% |
+| `clauses/merge` | 75 | 47 | 21 | 7 | 69% | 66% |
+| `clauses/remove` | 33 | 10 | 11 | 12 | 48% | 48% |
+| `clauses/return` | 63 | 19 | 44 | 0 | 30% | 27% |
+| `clauses/return-orderby` | 35 | 21 | 14 | 0 | 60% | 57% |
+| `clauses/return-skip-limit` | 31 | 20 | 11 | 0 | 65% | 65% |
+| `clauses/set` | 53 | 27 | 16 | 10 | 63% | 58% |
+| `clauses/union` | 12 | 12 | 0 | 0 | 100% | 33% |
+| `clauses/unwind` | 14 | 11 | 3 | 0 | 79% | 79% |
+| `clauses/with` | 29 | 14 | 15 | 0 | 48% | 38% |
+| `clauses/with-orderBy` | 292 | 188 | 39 | 65 | 83% | 71% |
+| `clauses/with-skip-limit` | 9 | 1 | 8 | 0 | 11% | 11% |
+| `clauses/with-where` | 19 | 7 | 12 | 0 | 37% | 37% |
+| `expressions/aggregation` | 35 | 16 | 19 | 0 | 46% | 46% |
+| `expressions/boolean` | 150 | 149 | 1 | 0 | 99% | 99% |
+| `expressions/comparison` | 72 | 52 | 20 | 0 | 72% | 65% |
+| `expressions/conditional` | 13 | 12 | 1 | 0 | 92% | 92% |
+| `expressions/existentialSubqueries` | 10 | 4 | 6 | 0 | 40% | 10% |
+| `expressions/graph` | 60 | 17 | 31 | 12 | 35% | 35% |
+| `expressions/list` | 185 | 180 | 5 | 0 | 97% | 97% |
+| `expressions/literals` | 131 | 131 | 0 | 0 | 100% | 69% |
+| `expressions/map` | 44 | 44 | 0 | 0 | 100% | 100% |
+| `expressions/mathematical` | 6 | 5 | 1 | 0 | 83% | 83% |
+| `expressions/null` | 44 | 40 | 4 | 0 | 91% | 91% |
+| `expressions/path` | 7 | 5 | 2 | 0 | 71% | 71% |
+| `expressions/pattern` | 50 | 43 | 7 | 0 | 86% | 34% |
+| `expressions/precedence` | 121 | 121 | 0 | 0 | 100% | 96% |
+| `expressions/quantifier` | 604 | 604 | 0 | 0 | 100% | 90% |
+| `expressions/string` | 32 | 32 | 0 | 0 | 100% | 100% |
+| `expressions/temporal` | 1,004 | 0 | 0 | 1,004 | – | – |
+| `expressions/typeConversion` | 47 | 25 | 22 | 0 | 53% | 53% |
+| `useCases/countingSubgraphMatches` | 11 | 10 | 1 | 0 | 91% | 91% |
+| `useCases/triadicSelection` | 19 | 19 | 0 | 0 | 100% | 5% |
+
+### Top remaining failure causes
+
+| Cause | Scenarios |
+|---|---:|
+| A node without a label (`CREATE ()`, `CREATE (:A)-[:T]->()`, `MERGE ({k: v})`) in the setup or the query | 391 |
+| A property named `id`: it becomes the element id, so `n.id` returns a string, `properties(n)` lacks it, and two nodes cannot share an `id` value | 18 (plus 33 that also create unlabeled nodes) |
+| Compile-time checks not done: `InvalidArgumentType` on literals (7), `AmbiguousAggregationExpression` (3), `InvalidDelete`, `InvalidParameterUse`, `RelationshipUniquenessViolation`, `NoSingleRelationshipType`, `UnknownFunction` (1 each) | 15 |
+| Full `EXISTS { }` subqueries (with `WITH`/`RETURN` or nested clauses) | 5 |
+| `<-[]->` relationship patterns | 3 |
+| Reading a deleted node's labels does not raise `EntityNotFound` | 1 |
+| A result over the 1,000,000-row cap | 1 |

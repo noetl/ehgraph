@@ -15,6 +15,8 @@ Each server instance provides:
 - versioned snapshots
 - session-scoped shared-memory graphs
 - access through MCP tools and HTTP, so NoETL playbooks and agents can use it
+- an openCypher query language (GQL-aligned subset) over HTTP, MCP (`graph.cypher`) and Bolt,
+  so standard Neo4j drivers work; see [docs/wiki/Cypher.md](docs/wiki/Cypher.md)
 - backup and restore through an object store
 
 Run one instance per purpose or topology domain, for example `ehgraph-noetl-cluster`

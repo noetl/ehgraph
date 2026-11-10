@@ -5,4 +5,4 @@
 
 mod dispatch;
 
-pub use dispatch::{ensure_primary, tool_specs, Caller, Engine, ToolSpec};
+pub use dispatch::{ensure_primary, tool_specs, Caller, CypherRun, Engine, ToolSpec};

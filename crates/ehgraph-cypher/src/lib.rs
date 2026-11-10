@@ -22,7 +22,7 @@ mod parser;
 mod value;
 
 pub use ast::Query;
-pub use exec::{execute, Changes, ExecOptions, Outcome, Stats};
+pub use exec::{execute, Changes, ExecOptions, Out, Outcome, Stats};
 pub use parser::parse;
 pub use value::Val;
 

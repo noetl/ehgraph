@@ -317,6 +317,25 @@ impl Engine {
     /// version for all deletions), so validation, schema checks and the no-op on
     /// identical content apply unchanged.
     fn cypher(&self, args: &Value, caller: &Caller, now_ms: i64) -> Result<Envelope, EhError> {
+        let run = self.run_cypher(args, caller, now_ms)?;
+        Ok(self.done(
+            run.graph_version,
+            json!({
+                "columns": run.outcome.columns,
+                "rows": run.outcome.rows_json(),
+                "stats": run.outcome.stats.to_json(),
+                "writes": run.writes,
+            }),
+        ))
+    }
+
+    /// `graph.cypher` with typed results, for protocol front ends (Bolt).
+    pub fn run_cypher(
+        &self,
+        args: &Value,
+        caller: &Caller,
+        now_ms: i64,
+    ) -> Result<CypherRun, EhError> {
         #[derive(Deserialize)]
         struct Args {
             namespace: String,
@@ -427,15 +446,11 @@ impl Engine {
                 "changed": result.changed, "applied": result.applied}),
             );
         }
-        Ok(self.done(
-            version,
-            json!({
-                "columns": outcome.columns,
-                "rows": outcome.rows_json(),
-                "stats": outcome.stats.to_json(),
-                "writes": writes,
-            }),
-        ))
+        Ok(CypherRun {
+            graph_version: version,
+            outcome,
+            writes,
+        })
     }
 
     fn read_neighbors(
@@ -880,6 +895,15 @@ impl Engine {
     fn page(&self, version: u64, data: Value, truncated: bool, cursor: Option<String>) -> Envelope {
         self.done(version, data).with_page(truncated, cursor)
     }
+}
+
+/// Result of one Cypher statement: the version it read (or wrote), its typed
+/// rows, and the write operations it committed.
+#[derive(Debug, Clone)]
+pub struct CypherRun {
+    pub graph_version: u64,
+    pub outcome: ehgraph_cypher::Outcome,
+    pub writes: Vec<Value>,
 }
 
 struct Located {

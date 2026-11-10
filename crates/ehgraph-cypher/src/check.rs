@@ -378,6 +378,13 @@ fn agg_structure(e: &Expr, inside: bool) -> Result<(), CypherError> {
         }
         if let Expr::Func { args, .. } = e {
             for a in args {
+                if calls_rand(a) {
+                    // Neo4j: NonConstantExpression. An aggregate over a fresh random
+                    // value per row has no meaningful result.
+                    return Err(CypherError::semantic(
+                        "non-constant expression: rand() cannot be used inside an aggregate function",
+                    ));
+                }
                 agg_structure(a, true)?;
             }
         }
@@ -419,6 +426,16 @@ fn agg_structure(e: &Expr, inside: bool) -> Result<(), CypherError> {
             res
         }
     }
+}
+
+/// Whether `e` calls `rand()` anywhere inside it.
+fn calls_rand(e: &Expr) -> bool {
+    if matches!(e, Expr::Func { name, .. } if name.eq_ignore_ascii_case("rand")) {
+        return true;
+    }
+    let mut found = false;
+    children(e, &mut |c| found |= calls_rand(c));
+    found
 }
 
 fn children<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {

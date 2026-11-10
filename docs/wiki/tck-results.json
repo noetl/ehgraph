@@ -1,7 +1,7 @@
 {
  "tck": {"repo": "https://github.com/opencypher/openCypher", "tag": "2024.3", "commit": "677cbafabb8c3c5eed458fd3b1ec0daec8d67d23"},
  "date": "2026-11-10",
- "totals": {"before": {"out-of-model": 1170, "fail": 882, "pass": 1844}, "after": {"out-of-model": 1170, "fail": 435, "pass": 2291}},
+ "totals": {"before": {"out-of-model": 1170, "fail": 882, "pass": 1844}, "after": {"out-of-model": 1170, "fail": 434, "pass": 2292}},
  "scenarios": [
   {"file": "clauses/call/Call1.feature", "scenario": "[1] Standalone call to procedure that takes no arguments and yields no results", "status": "out-of-model", "reason": "procedures (CALL)"},
   {"file": "clauses/call/Call1.feature", "scenario": "[2] Standalone call to procedure that takes no arguments and yields no results, called with implicit arguments", "status": "out-of-model", "reason": "procedures (CALL)"},
@@ -750,7 +750,7 @@
   {"file": "clauses/return/Return6.feature", "scenario": "[12] Counting matches per group", "status": "fail", "reason": "setup: cypher semantic error: ehgraph nodes carry exactly one label (the node type); got 0"},
   {"file": "clauses/return/Return6.feature", "scenario": "[13] Returning the minimum length of paths", "status": "pass"},
   {"file": "clauses/return/Return6.feature", "scenario": "[14] Aggregates in aggregates", "status": "pass"},
-  {"file": "clauses/return/Return6.feature", "scenario": "[15] Using `rand()` in aggregations", "status": "fail", "reason": "expected SyntaxError (NonConstantExpression), query succeeded (1 rows)"},
+  {"file": "clauses/return/Return6.feature", "scenario": "[15] Using `rand()` in aggregations", "status": "pass"},
   {"file": "clauses/return/Return6.feature", "scenario": "[16] Aggregation on complex expressions", "status": "fail", "reason": "setup: cypher semantic error: ehgraph nodes carry exactly one label (the node type); got 0"},
   {"file": "clauses/return/Return6.feature", "scenario": "[17] Handle constants and parameters inside an expression which contains an aggregation expression", "status": "pass"},
   {"file": "clauses/return/Return6.feature", "scenario": "[18] Handle returned variables inside an expression which contains an aggregation expression", "status": "pass"},

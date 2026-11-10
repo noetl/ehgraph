@@ -239,11 +239,11 @@ Run on 2026-11-10 against the openCypher TCK **2024.3**, commit
 | | Scenarios | Pass | Fail | Out of model | Pass rate, all scenarios | Pass rate, in-model |
 |---|---:|---:|---:|---:|---:|---:|
 | Before the fixes in this change (main at `9d97955`) | 3,896 | 1,844 | 882 | 1,170 | 47.3% | 67.6% |
-| After | 3,896 | **2,291** | 435 | 1,170 | **58.8%** | **84.0%** |
+| After | 3,896 | **2,292** | 434 | 1,170 | **58.8%** | **84.1%** |
 
 "In-model" is pass / (pass + fail). One more scenario is tagged `@ignore` by the TCK itself and is
-not run. 391 of the 435 remaining failures are scenarios that create a node without a label
-(see the top causes below); without them the in-model pass rate would be 98.1%, but they are
+not run. 391 of the 434 remaining failures are scenarios that create a node without a label
+(see the top causes below); without them the in-model pass rate would be 98.2%, but they are
 counted as failures because an unlabeled node is a gap, not a reason to exclude a scenario.
 
 ### Reproduce
@@ -316,7 +316,7 @@ element id), `<-[]->`, row limits.
 | `clauses/match-where` | 34 | 21 | 13 | 0 | 62% | 59% |
 | `clauses/merge` | 75 | 47 | 21 | 7 | 69% | 66% |
 | `clauses/remove` | 33 | 10 | 11 | 12 | 48% | 48% |
-| `clauses/return` | 63 | 18 | 45 | 0 | 29% | 27% |
+| `clauses/return` | 63 | 19 | 44 | 0 | 30% | 27% |
 | `clauses/return-orderby` | 35 | 21 | 14 | 0 | 60% | 57% |
 | `clauses/return-skip-limit` | 31 | 20 | 11 | 0 | 65% | 65% |
 | `clauses/set` | 53 | 27 | 16 | 10 | 63% | 58% |
@@ -353,7 +353,7 @@ element id), `<-[]->`, row limits.
 |---|---:|
 | A node without a label (`CREATE ()`, `CREATE (:A)-[:T]->()`, `MERGE ({k: v})`) in the setup or the query | 391 |
 | A property named `id`: it becomes the element id, so `n.id` returns a string, `properties(n)` lacks it, and two nodes cannot share an `id` value | 18 (plus 33 that also create unlabeled nodes) |
-| Compile-time checks not done: `InvalidArgumentType` on literals (7), `AmbiguousAggregationExpression` (3), `InvalidDelete`, `InvalidParameterUse`, `RelationshipUniquenessViolation`, `NoSingleRelationshipType`, `UnknownFunction`, `NonConstantExpression` (1 each) | 16 |
+| Compile-time checks not done: `InvalidArgumentType` on literals (7), `AmbiguousAggregationExpression` (3), `InvalidDelete`, `InvalidParameterUse`, `RelationshipUniquenessViolation`, `NoSingleRelationshipType`, `UnknownFunction` (1 each) | 15 |
 | Full `EXISTS { }` subqueries (with `WITH`/`RETURN` or nested clauses) | 5 |
 | `<-[]->` relationship patterns | 3 |
 | Reading a deleted node's labels does not raise `EntityNotFound` | 1 |

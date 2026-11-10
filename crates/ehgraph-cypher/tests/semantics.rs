@@ -258,6 +258,14 @@ fn rand_is_a_float_in_unit_interval() {
     let vals: Vec<f64> = rows.iter().map(|r| r[0].as_f64().unwrap()).collect();
     assert!(vals.iter().all(|v| (0.0..1.0).contains(v)));
     assert!(vals.windows(2).any(|w| w[0] != w[1]));
+    // An aggregate over rand() is rejected before anything runs (TCK Return6 [15]).
+    assert!(err("RETURN count(rand())").contains("non-constant expression"));
+    assert!(err("UNWIND [1, 2] AS x RETURN sum(x + rand())").contains("non-constant"));
+    // rand() outside an aggregate, or an aggregate next to it, is fine.
+    assert_eq!(
+        run("RETURN count(*) AS n, rand() < 1.0 AS ok"),
+        vec![json!([1, true])]
+    );
 }
 
 #[test]

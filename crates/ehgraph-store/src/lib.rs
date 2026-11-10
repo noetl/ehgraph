@@ -20,5 +20,5 @@ pub use arrow_batch::{batch_memory_size, edges_to_batch, nodes_to_batch};
 pub use state::{KeyLimits, KeyWindow, MaterializedGraph};
 pub use store::{
     BackupNamespace, BackupPlan, CompactCrash, CompactionReport, DeactivateRequest, NsSummary,
-    SnapshotInfo, Store, StoreConfig, VersionInfo, WriteOutcome,
+    SnapshotInfo, Store, StoreConfig, TxRequest, VersionInfo, WriteOutcome,
 };

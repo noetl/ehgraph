@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use ehgraph_core::{
-    canonical_hash, now_ms, validate_namespace, ChangeBatch, EhError, ErrorCode, FrameBody,
-    IdempotencyNote, SchemaConfig, Scope, StoredOp, WriteRequest,
+    canonical_hash, now_ms, validate_namespace, ChangeBatch, EdgeInput, EhError, ErrorCode, Expect,
+    FrameBody, IdempotencyNote, NodeInput, SchemaConfig, Scope, StoredOp, WriteRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +77,23 @@ pub struct DeactivateRequest {
     pub source: Option<String>,
     pub not_seen_since_ms: Option<i64>,
     pub idempotency_key: Option<String>,
+    pub execution_id: String,
+    pub ts_ms: i64,
+}
+
+/// One atomic, optionally conditional commit: upserts and deactivations land in a
+/// single change-log frame, so a single `graph_version` (or nothing at all).
+#[derive(Debug, Clone, Default)]
+pub struct TxRequest {
+    pub namespace: String,
+    pub nodes: Vec<NodeInput>,
+    pub edges: Vec<EdgeInput>,
+    /// Element ids to soft-deactivate (by id only).
+    pub deactivate: Vec<String>,
+    /// Preconditions checked under the write lock before anything is planned.
+    pub expect: Expect,
+    pub idempotency_key: Option<String>,
+    pub source: String,
     pub execution_id: String,
     pub ts_ms: i64,
 }
@@ -381,6 +398,111 @@ impl Store {
             &mut inner,
             &namespace,
             key,
+            hash,
+            request.execution_id,
+            request.ts_ms,
+            ops,
+            true,
+        )
+    }
+
+    /// Commit `request` atomically, as one graph version.
+    ///
+    /// Under the store's write lock, in order: idempotency replay, the `expect`
+    /// preconditions, then `validate` (a caller-supplied check against the head graph,
+    /// e.g. a transaction's read-set validation), then planning and one frame append.
+    /// Any failure writes nothing. A request whose net effect is empty writes nothing
+    /// and reports `changed = false` (an idempotency key is still recorded).
+    pub fn transact(
+        &self,
+        request: TxRequest,
+        validate: &dyn Fn(&MaterializedGraph) -> Result<(), EhError>,
+    ) -> Result<WriteOutcome, EhError> {
+        validate_namespace(&request.namespace)?;
+        if request.source.is_empty() || request.execution_id.is_empty() {
+            return Err(EhError::invalid("source and execution_id are required"));
+        }
+        let hash = canonical_hash(&serde_json::json!({
+            "op": "transact",
+            "namespace": request.namespace,
+            "nodes": request.nodes,
+            "edges": request.edges,
+            "deactivate": request.deactivate,
+            "expect": request.expect,
+            "source": request.source,
+        }));
+        let mut inner = self.lock()?;
+        if let Some(outcome) =
+            take_idempotent(&inner, &request.namespace, &request.idempotency_key, &hash)?
+        {
+            return Ok(outcome);
+        }
+        let empty = MaterializedGraph::default();
+        let (existing, head) = match inner.namespaces.get(&request.namespace) {
+            Some(ns) => (&ns.graph, ns.head),
+            None => (&empty, 0),
+        };
+        check_expect(existing, head, &request.namespace, &request.expect)?;
+        validate(existing)?;
+        let mut ops = Vec::new();
+        if !request.nodes.is_empty() || !request.edges.is_empty() {
+            let schema = read_schema(&self.cfg, &request.namespace)?;
+            let write = WriteRequest {
+                namespace: request.namespace.clone(),
+                nodes: request.nodes.clone(),
+                edges: request.edges.clone(),
+                idempotency_key: None,
+                source: request.source.clone(),
+                execution_id: request.execution_id.clone(),
+                ts_ms: request.ts_ms,
+            };
+            ops = plan_upsert(existing, &write, &schema)?;
+        }
+        if !request.deactivate.is_empty() {
+            if head == 0 {
+                return Err(EhError::not_found(format!(
+                    "namespace {} not found",
+                    request.namespace
+                )));
+            }
+            let upserted: std::collections::HashSet<String> = request
+                .nodes
+                .iter()
+                .map(|n| n.id.clone())
+                .chain(request.edges.iter().map(|e| {
+                    e.id.clone().unwrap_or_else(|| {
+                        ehgraph_core::default_edge_id(
+                            &e.src,
+                            &e.type_name,
+                            &e.dst,
+                            e.origin.as_deref(),
+                        )
+                    })
+                }))
+                .collect();
+            if let Some(id) = request
+                .deactivate
+                .iter()
+                .find(|id| upserted.contains(id.as_str()))
+            {
+                return Err(EhError::invalid(format!(
+                    "element {id} is both upserted and deactivated in one commit"
+                )));
+            }
+            ops.extend(plan_deactivate(
+                existing,
+                &request.deactivate,
+                None,
+                None,
+                None,
+                request.ts_ms,
+            )?);
+        }
+        let namespace = request.namespace.clone();
+        self.commit(
+            &mut inner,
+            &namespace,
+            request.idempotency_key,
             hash,
             request.execution_id,
             request.ts_ms,
@@ -974,6 +1096,45 @@ fn source_of(ops: &[ehgraph_core::StoredOp]) -> String {
         Some(ehgraph_core::StoredOp::UpsertEdge { edge }) => edge.source.clone(),
         _ => String::new(),
     }
+}
+
+/// `expect` against the head graph. `head` is 0 for a namespace that does not exist.
+fn check_expect(
+    graph: &MaterializedGraph,
+    head: u64,
+    namespace: &str,
+    expect: &Expect,
+) -> Result<(), EhError> {
+    if let Some(want) = expect.graph_version {
+        if want != head {
+            return Err(EhError::new(
+                ErrorCode::VersionConflict,
+                format!(
+                    "expectation failed: namespace {namespace} is at graph_version {head}, expected {want}"
+                ),
+            ));
+        }
+    }
+    for (id, want) in &expect.versions {
+        let have = graph
+            .nodes
+            .get(id)
+            .map(|n| n.version_updated)
+            .or_else(|| graph.edges.get(id).map(|e| e.version_updated))
+            .unwrap_or(0);
+        if have != *want {
+            let what = if have == 0 {
+                "does not exist".to_string()
+            } else {
+                format!("is at version {have}")
+            };
+            return Err(EhError::new(
+                ErrorCode::VersionConflict,
+                format!("expectation failed: element {id} {what}, expected version {want}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn take_idempotent(

@@ -9,7 +9,8 @@ remain the stable contract that existing writers use. Cypher is an extra interfa
 |---|---|---|
 | MCP tool `graph.cypher` | `POST /mcp` `tools/call` | arguments below, envelope result |
 | HTTP | `POST /v1/cypher` (= `POST /v1/tools/graph.cypher`) | same body, same envelope |
-| Neo4j Query API v2 shape | `POST /db/{namespace}/query/v2` | `{"statement","parameters"}` → `202 {"data":{"fields","values"},"counters"}` |
+| Neo4j Query API v2 shape | `POST /db/{namespace}/query/v2`, explicit transactions under `…/query/v2/tx` | `{"statement","parameters"}` → `202 {"data":{"fields","values"},"counters"}` |
+| Transactions | `graph.tx.begin` / `run` / `commit` / `rollback` | multi-statement, atomic, serializable. See [Transactions](Transactions) |
 | Bolt 5.0 / 4.4 | `[bolt] listen = "127.0.0.1:7687"` (off unless configured) | official Neo4j drivers, `bolt://` |
 
 ## 1. The data model it maps onto
@@ -29,15 +30,17 @@ ehgraph is a **labeled property graph** (LPG):
 | `first_seen`, `last_seen`, `source`, `origin`, `execution_id`, `version_updated` | `eh.firstSeen(x)`, `eh.lastSeen(x)`, `eh.source(x)`, `eh.origin(x)`, `eh.executionId(x)`, `eh.version(x)`, `eh.active(x)` |
 
 How writes commit: an updating query runs on a copy-on-write overlay of the head view.
-Its net effect then goes through the existing write paths:
-
-1. Every created or changed node and edge goes to one `graph.upsert` batch, so one version, with full property images.
-2. Every deleted element goes to one `graph.deactivate` by ids, so one more version.
+Its net effect (every created or changed node and edge with full property images, plus every
+deleted element as a soft deactivation) then commits **atomically as one graph version**,
+on condition that nothing the query read changed in the meantime (serializable; a lost race is
+re-run on the new head). Multi-statement transactions and conditional (`expect`) commits work the
+same way; see [Transactions](Transactions).
 
 Validation, schema rules (`strict`, required properties), idempotency keys and "identical content
-does not bump the version" all apply unchanged. So `MERGE … SET` with the same values writes
-nothing (`stats.contains_updates = false`, no new version). The `writes` field of the result lists
-the operations that were committed.
+does not bump the version" all apply as for `graph.upsert`. So `MERGE … SET` with the same values writes
+nothing (`stats.contains_updates = false`, no new version). The `writes` field of the result
+describes the commit: `[{"op": "commit", "graph_version", "changed", "applied", "upserted", "deactivated"}]`,
+or `[]` when nothing changed.
 
 ## 2. Why openCypher
 
@@ -73,7 +76,8 @@ POST /v1/cypher
   "source": "cypher",          // optional: `source` stamped on written elements (default "cypher")
   "execution_id": "…",         // optional (default "cypher:<ms>")
   "idempotency_key": "…",      // optional: passed to graph.upsert (and "<key>:deactivate")
-  "max_rows": 100000           // optional cap on intermediate/result rows (≤ 1,000,000)
+  "max_rows": 100000,          // optional cap on intermediate/result rows (≤ 1,000,000)
+  "expect": {"versions": {"gw:1": 9121}, "graph_version": 9121}  // optional, updating only: see Transactions
 }
 ```
 
@@ -93,7 +97,8 @@ Nodes come back as `{"elementId","labels","properties"}`, relationships as
 Errors use the normal envelope: `INVALID_ARGUMENT` (400) for syntax, type, semantic and
 unsupported-feature errors, with messages that start `cypher syntax error: …`,
 `cypher unsupported error: …` and so on. `CONFLICT` (409) is for constraint errors (a `CREATE` of an
-existing id, or a `DELETE` of a node that still has relationships). `UNAUTHORIZED` (401) is for a
+existing id, or a `DELETE` of a node that still has relationships). `VERSION_CONFLICT` (409) means
+a failed `expect` or a serialization conflict that persisted after the automatic retries. Nothing was written. `UNAUTHORIZED` (401) is for a
 write without a write grant, and `READ_ONLY_SESSION` (403) for a write with `version` or `graph_session_id`.
 
 ## 4. Supported subset and gaps
@@ -125,7 +130,7 @@ write without a write grant, and `READ_ONLY_SESSION` (403) for a write with `ver
 | Multiple labels per node, label expressions `:A&B`, `:!A` | ❌ | Model has one type per node |
 | Parallel relationships of the same type between the same nodes | ⚠️ | Only with an explicit relationship `{id: …}` |
 | Schema DDL (`CREATE INDEX/CONSTRAINT`) | ❌ | Schema is `data_dir/schemas/<ns>.json` |
-| Multi-statement transactions | ⚠️ | Each query commits on its own: upserts in one version, then deactivations in a second. No serializable isolation across concurrent writers (last writer wins per element) |
+| Multi-statement transactions | ✅ | `graph.tx.*`, Bolt BEGIN/COMMIT/ROLLBACK, Query API `/tx`. Snapshot reads + read-your-writes; one atomic, serializable commit (optimistic, first committer wins); conditional commits with `expect`. See [Transactions](Transactions) |
 
 ### Expressions and functions
 
@@ -174,7 +179,7 @@ with GraphDatabase.driver("bolt://127.0.0.1:7687", auth=("any", "<ehgraph bearer
 | Handshake: 5.0 preferred, 4.4 fallback | ✅ 5.0 sends `element_id` = ehgraph id. Under 4.4 the integer ids are a stable hash |
 | HELLO (basic/bearer → ehgraph token), LOGON/LOGOFF, RESET, GOODBYE, TELEMETRY | ✅ |
 | RUN / PULL (`n`, `has_more`) / DISCARD; FAILURE → IGNORED until RESET | ✅ |
-| BEGIN / COMMIT, `execute_read` / `execute_write` | ✅ Each RUN commits when it runs. ROLLBACK after a write fails loudly (no multi-statement atomicity) |
+| BEGIN / COMMIT / ROLLBACK, `execute_read` / `execute_write` | ✅ Real transactions: RUNs read the snapshot plus their own writes. COMMIT writes everything as one version, or fails with `Neo.TransientError.Transaction.Outdated` on a lost race (the drivers retry). ROLLBACK, RESET or a dropped connection discards. `tx_timeout` and `tx_metadata.expect` are honoured |
 | Node, Relationship, Path, UnboundRelationship structs | ✅ |
 | Server agent | `Neo4j/5.0.0 compatible graph database server - ehgraph …` (drivers refuse any agent without the `Neo4j/` prefix; Memgraph does the same) |
 | ROUTE / `neo4j://` routing | ❌ Use `bolt://` |
@@ -209,6 +214,6 @@ MERGE (n:Device {id: r.id}) SET n += r.props
 1. `UNION`, `EXISTS {}` / `COUNT {}` subqueries, pattern predicates, `=~`, `reduce()`.
 2. GQL surface syntax alongside the Cypher forms: `INSERT`, `FILTER`, `LET`, quantified path patterns `((a)-[:T]->(b)){1,4}`, `ANY SHORTEST` / `ALL SHORTEST`, path modes (`TRAIL`, `ACYCLIC`).
 3. Run the openCypher TCK scenarios that fall within the single-label model, and publish the pass rate.
-4. Conditional commit (expected `graph_version`) for serializable read-modify-write, and multi-statement Bolt transactions.
+4. ~~Conditional commit and multi-statement Bolt transactions~~: done, see [Transactions](Transactions). Next: property-granular conflict detection and server-side retry of explicit transactions.
 5. Bolt: TLS, 5.1+ (LOGON), and a routing table for single-instance `neo4j://`.
 6. Temporal types mapped to ehgraph timestamps, and secondary property indexes for large label scans.

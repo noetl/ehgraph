@@ -84,6 +84,8 @@ pub struct Engine {
     /// `0` is unlimited.
     pub resident_graph_bytes: u64,
     pub head_views: HeadViews,
+    /// Open multi-statement transactions (`graph.tx.*`, Bolt BEGIN, Query API `/tx`).
+    pub txs: crate::tx::TxRegistry,
 }
 
 impl Engine {
@@ -123,6 +125,10 @@ impl Engine {
             "graph.edge" => self.read_edge(args, caller, now_ms),
             "graph.query" => self.read_query(args, caller, now_ms),
             "graph.cypher" => self.cypher(args, caller, now_ms),
+            "graph.tx.begin" => self.tool_tx_begin(args, caller, now_ms),
+            "graph.tx.run" => self.tool_tx_run(args, caller, now_ms),
+            "graph.tx.commit" => self.tool_tx_commit(args, caller, now_ms),
+            "graph.tx.rollback" => self.tool_tx_rollback(args, caller, now_ms),
             "graph.neighbors" => self.read_neighbors(args, caller, now_ms),
             "graph.subgraph" => self.read_subgraph(args, caller, now_ms),
             "graph.path" => self.read_path(args, caller, now_ms),
@@ -145,7 +151,25 @@ impl Engine {
             request.ts_ms = now_ms();
         }
         self.require(caller, &request.namespace, true)?;
-        let outcome = self.store.upsert(request)?;
+        let expect = parse_expect(args, "graph.upsert")?;
+        let outcome = if expect.is_empty() {
+            self.store.upsert(request)?
+        } else {
+            self.store.transact(
+                ehgraph_store::TxRequest {
+                    namespace: request.namespace,
+                    nodes: request.nodes,
+                    edges: request.edges,
+                    deactivate: Vec::new(),
+                    expect,
+                    idempotency_key: request.idempotency_key,
+                    source: request.source,
+                    execution_id: request.execution_id,
+                    ts_ms: request.ts_ms,
+                },
+                &|_| Ok(()),
+            )?
+        };
         Ok(self.done(
             outcome.graph_version,
             json!({
@@ -173,10 +197,46 @@ impl Engine {
             execution_id: String,
             #[serde(default)]
             ts_ms: i64,
+            #[serde(default)]
+            expect: ehgraph_core::Expect,
         }
         let parsed: Args = serde_json::from_value(args.clone())
             .map_err(|err| EhError::invalid(format!("graph.deactivate: {err}")))?;
         self.require(caller, &parsed.namespace, true)?;
+        let ts_ms = if parsed.ts_ms == 0 {
+            now_ms()
+        } else {
+            parsed.ts_ms
+        };
+        if !parsed.expect.is_empty() {
+            if parsed.ids.is_empty() || parsed.source.is_some() || parsed.not_seen_since.is_some() {
+                return Err(EhError::invalid(
+                    "graph.deactivate: `expect` needs deactivation by `ids`",
+                ));
+            }
+            let outcome = self.store.transact(
+                ehgraph_store::TxRequest {
+                    namespace: parsed.namespace,
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    deactivate: parsed.ids,
+                    expect: parsed.expect,
+                    idempotency_key: parsed.idempotency_key,
+                    source: "graph.deactivate".to_string(),
+                    execution_id: parsed.execution_id,
+                    ts_ms,
+                },
+                &|_| Ok(()),
+            )?;
+            return Ok(self.done(
+                outcome.graph_version,
+                json!({
+                    "graph_version": outcome.graph_version,
+                    "changed": outcome.changed,
+                    "applied": outcome.applied,
+                }),
+            ));
+        }
         let outcome = self.store.deactivate(DeactivateRequest {
             namespace: parsed.namespace,
             ids: parsed.ids,
@@ -185,11 +245,7 @@ impl Engine {
             not_seen_since_ms: parsed.not_seen_since,
             idempotency_key: parsed.idempotency_key,
             execution_id: parsed.execution_id,
-            ts_ms: if parsed.ts_ms == 0 {
-                now_ms()
-            } else {
-                parsed.ts_ms
-            },
+            ts_ms,
         })?;
         Ok(self.done(
             outcome.graph_version,
@@ -356,6 +412,8 @@ impl Engine {
             idempotency_key: Option<String>,
             #[serde(default)]
             max_rows: Option<usize>,
+            #[serde(default)]
+            expect: ehgraph_core::Expect,
         }
         let parsed: Args = serde_json::from_value(args.clone())
             .map_err(|err| EhError::invalid(format!("graph.cypher: {err}")))?;
@@ -392,65 +450,57 @@ impl Engine {
             version: parsed.version,
             id: None,
         };
-        let run = |graph: &SessionGraph| {
-            ehgraph_cypher::execute(graph, &query, &params, &opts).map_err(EhError::from)
-        };
-        // An updating query may create the namespace, like a first `graph.upsert`.
-        let fresh = updating
-            && matches!(self.store.head(&parsed.namespace), Err(ref e) if e.code == ErrorCode::NotFound);
-        let (read_version, outcome) = if fresh {
-            ehgraph_core::validate_namespace(&parsed.namespace)?;
-            let empty = SessionGraph::from_materialized(
-                &ehgraph_store::MaterializedGraph::from_elements(0, Vec::new(), Vec::new()),
-            )?;
-            (0, run(&empty)?)
-        } else {
-            self.with_graph(&located, now_ms, run)?
-        };
-        let mut version = read_version;
-        let mut writes = Vec::new();
-        let changes = &outcome.changes;
-        if !changes.nodes.is_empty() || !changes.edges.is_empty() {
-            let result = self.store.upsert(WriteRequest {
-                namespace: parsed.namespace.clone(),
-                nodes: changes.nodes.clone(),
-                edges: changes.edges.clone(),
+        if !updating {
+            if !parsed.expect.is_empty() {
+                return Err(EhError::invalid(
+                    "graph.cypher: `expect` applies to updating queries only",
+                ));
+            }
+            let (version, outcome) = self.with_graph(&located, now_ms, |graph| {
+                ehgraph_cypher::execute(graph, &query, &params, &opts).map_err(EhError::from)
+            })?;
+            return Ok(CypherRun {
+                graph_version: version,
+                outcome,
+                writes: Vec::new(),
+            });
+        }
+        // Auto-commit write: run against a head snapshot, then commit the net effect
+        // atomically (one graph version) on condition that nothing the statement read
+        // changed meanwhile. A lost race re-runs the statement on the new head; the
+        // caller only ever sees the committed attempt.
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let base = self.tx_base(&parsed.namespace)?;
+            let mut state = ehgraph_cypher::TxState::default();
+            let outcome = ehgraph_cypher::execute_in(&base, &mut state, &query, &params, &opts)
+                .map_err(EhError::from)?;
+            let commit = crate::tx::Commit {
+                namespace: &parsed.namespace,
+                base: &base,
+                changes: &outcome.changes,
+                footprint: &state.footprint,
+                expect: &parsed.expect,
                 idempotency_key: parsed.idempotency_key.clone(),
-                source: source.clone(),
-                execution_id: execution_id.clone(),
+                source: &source,
+                execution_id: &execution_id,
                 ts_ms: write_ts,
-            })?;
-            version = result.graph_version;
-            writes.push(
-                json!({"op": "graph.upsert", "graph_version": result.graph_version,
-                "changed": result.changed, "applied": result.applied}),
-            );
+            };
+            match self.commit_tx(commit) {
+                Ok((version, writes)) => {
+                    return Ok(CypherRun {
+                        graph_version: version,
+                        outcome,
+                        writes,
+                    })
+                }
+                Err(crate::tx::CommitError::Serialization(_)) if attempt < AUTOCOMMIT_ATTEMPTS => {
+                    continue
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
-        if !changes.deactivate.is_empty() {
-            let result = self.store.deactivate(DeactivateRequest {
-                namespace: parsed.namespace.clone(),
-                ids: changes.deactivate.clone(),
-                origin: None,
-                source: None,
-                not_seen_since_ms: None,
-                idempotency_key: parsed
-                    .idempotency_key
-                    .as_ref()
-                    .map(|k| format!("{k}:deactivate")),
-                execution_id,
-                ts_ms: write_ts,
-            })?;
-            version = result.graph_version;
-            writes.push(
-                json!({"op": "graph.deactivate", "graph_version": result.graph_version,
-                "changed": result.changed, "applied": result.applied}),
-            );
-        }
-        Ok(CypherRun {
-            graph_version: version,
-            outcome,
-            writes,
-        })
     }
 
     fn read_neighbors(
@@ -744,6 +794,8 @@ impl Engine {
                 "domain": self.identity.domain,
                 "role": self.identity.role.as_str(),
                 "build": self.build,
+                "features": ["cypher", "transactions", "expect", "serializable_commits"],
+                "open_transactions": self.txs.open(),
                 "budgets": {
                     "global_bytes": self.global_bytes,
                     "per_session_bytes": self.per_session_bytes,
@@ -831,7 +883,7 @@ impl Engine {
         Ok((version, f(&graph)?))
     }
 
-    fn head_view(&self, namespace: &str) -> Result<Arc<SessionGraph>, EhError> {
+    pub(crate) fn head_view(&self, namespace: &str) -> Result<Arc<SessionGraph>, EhError> {
         let head = self.store.head(namespace)?;
         if let Ok(views) = self.head_views.views.lock() {
             if let Some(view) = views.get(namespace).filter(|v| v.version == head) {
@@ -871,7 +923,12 @@ impl Engine {
         )
     }
 
-    fn require(&self, caller: &Caller, namespace: &str, write: bool) -> Result<(), EhError> {
+    pub(crate) fn require(
+        &self,
+        caller: &Caller,
+        namespace: &str,
+        write: bool,
+    ) -> Result<(), EhError> {
         let allowed = if write {
             caller.can_write(namespace)
         } else {
@@ -888,14 +945,24 @@ impl Engine {
         }
     }
 
-    fn done(&self, version: u64, data: Value) -> Envelope {
+    pub(crate) fn done(&self, version: u64, data: Value) -> Envelope {
         Envelope::success(&self.identity, Some(version), data)
     }
 
-    fn page(&self, version: u64, data: Value, truncated: bool, cursor: Option<String>) -> Envelope {
+    pub(crate) fn page(
+        &self,
+        version: u64,
+        data: Value,
+        truncated: bool,
+        cursor: Option<String>,
+    ) -> Envelope {
         self.done(version, data).with_page(truncated, cursor)
     }
 }
+
+/// How many times an auto-commit Cypher write is run before a serialization
+/// conflict is returned to the caller.
+const AUTOCOMMIT_ATTEMPTS: u32 = 3;
 
 /// Result of one Cypher statement: the version it read (or wrote), its typed
 /// rows, and the write operations it committed.
@@ -937,6 +1004,15 @@ fn locate(args: &Value) -> Result<Located, EhError> {
     })
 }
 
+/// The optional `expect` argument of a write tool.
+fn parse_expect(args: &Value, tool: &str) -> Result<ehgraph_core::Expect, EhError> {
+    match args.get("expect") {
+        None | Some(Value::Null) => Ok(Default::default()),
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|err| EhError::invalid(format!("{tool}: expect: {err}"))),
+    }
+}
+
 fn required_session(args: &Value) -> Result<String, EhError> {
     args.get("graph_session_id")
         .and_then(|value| value.as_str())
@@ -976,7 +1052,7 @@ fn default_limit() -> usize {
 fn default_max_nodes() -> usize {
     100
 }
-fn default_hops() -> u32 {
+pub(crate) fn default_hops() -> u32 {
     16
 }
 fn default_direction() -> String {
@@ -1010,6 +1086,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 ("idempotency_key", "string", false),
                 ("source", "string", true),
                 ("execution_id", "string", true),
+                ("expect", "object", false),
             ]),
         ),
         spec(
@@ -1021,6 +1098,7 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 ("source", "string", false),
                 ("not_seen_since", "integer", false),
                 ("execution_id", "string", true),
+                ("expect", "object", false),
             ]),
         ),
         spec(
@@ -1070,7 +1148,42 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 ("idempotency_key", "string", false),
                 ("graph_session_id", "string", false),
                 ("version", "integer", false),
+                ("expect", "object", false),
             ]),
+        ),
+        spec(
+            "graph.tx.begin",
+            "Open a multi-statement transaction on a namespace. Statements read the snapshot at begin plus the transaction's own writes; nothing is written until graph.tx.commit. Idle timeout timeout_ms (default 30000).",
+            object(&[
+                ("namespace", "string", true),
+                ("timeout_ms", "integer", false),
+                ("source", "string", false),
+                ("execution_id", "string", false),
+            ]),
+        ),
+        spec(
+            "graph.tx.run",
+            "Run one openCypher statement inside a transaction.",
+            object(&[
+                ("tx_id", "string", true),
+                ("query", "string", true),
+                ("params", "object", false),
+                ("max_rows", "integer", false),
+            ]),
+        ),
+        spec(
+            "graph.tx.commit",
+            "Commit a transaction atomically as one graph version, only if nothing it read changed since its snapshot (serializable) and every `expect` holds; otherwise VERSION_CONFLICT and nothing is written.",
+            object(&[
+                ("tx_id", "string", true),
+                ("expect", "object", false),
+                ("idempotency_key", "string", false),
+            ]),
+        ),
+        spec(
+            "graph.tx.rollback",
+            "Discard a transaction and everything it wrote.",
+            object(&[("tx_id", "string", true)]),
         ),
         spec(
             "graph.neighbors",

@@ -27,7 +27,9 @@ Query language: `graph.cypher` (openCypher subset, reads and writes; see [Cypher
 
 Read: `graph.node`, `graph.edge`, `graph.query`, `graph.neighbors`, `graph.subgraph`, `graph.path`, `graph.snapshot.info`.
 
-Write: `graph.upsert`, `graph.deactivate`, `graph.snapshot.create`. Rejected with `READ_ONLY_SESSION` when `graph_session_id` is set.
+Write: `graph.upsert`, `graph.deactivate`, `graph.snapshot.create`. Rejected with `READ_ONLY_SESSION` when `graph_session_id` is set. `graph.upsert` and `graph.deactivate` accept an optional `expect` (conditional commit; `VERSION_CONFLICT` 409 when it fails).
+
+Transactions: `graph.tx.begin`, `graph.tx.run`, `graph.tx.commit`, `graph.tx.rollback` (see [Transactions](Transactions)).
 
 Instance: `graph.instance.info`, `graph.backup.status`.
 

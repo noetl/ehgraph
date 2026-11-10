@@ -359,3 +359,56 @@ impl Edge {
         element + ids + endpoint_keys
     }
 }
+
+/// Preconditions for a conditional commit: the commit applies only when every
+/// expectation holds at commit time, checked under the store's write lock.
+///
+/// - `graph_version`: the namespace head must equal this (0 = the namespace does
+///   not exist yet). Whole-namespace compare-and-set.
+/// - `versions`: per element id (node or edge; ids never collide), the element's
+///   `version_updated` must equal the value. `0` means "must not exist".
+///   Deactivation bumps `version_updated`, so a concurrent delete fails it too.
+///
+/// A failed expectation writes nothing and returns `VERSION_CONFLICT` (409).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Expect {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub versions: std::collections::BTreeMap<String, u64>,
+}
+
+impl Expect {
+    pub fn is_empty(&self) -> bool {
+        self.graph_version.is_none() && self.versions.is_empty()
+    }
+
+    /// Merge `other` into `self`. Two different expectations for the same element
+    /// (or the graph version) can never both hold; that is an argument error.
+    pub fn merge(&mut self, other: &Expect) -> Result<(), crate::EhError> {
+        if let Some(v) = other.graph_version {
+            match self.graph_version {
+                Some(existing) if existing != v => {
+                    return Err(crate::EhError::invalid(format!(
+                        "conflicting expectations for graph_version: {existing} and {v}"
+                    )))
+                }
+                _ => self.graph_version = Some(v),
+            }
+        }
+        for (id, v) in &other.versions {
+            match self.versions.get(id) {
+                Some(existing) if existing != v => {
+                    return Err(crate::EhError::invalid(format!(
+                        "conflicting expectations for {id}: {existing} and {v}"
+                    )))
+                }
+                _ => {
+                    self.versions.insert(id.clone(), *v);
+                }
+            }
+        }
+        Ok(())
+    }
+}

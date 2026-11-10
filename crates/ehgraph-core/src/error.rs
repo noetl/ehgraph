@@ -13,6 +13,10 @@ pub enum ErrorCode {
     MemoryBudgetExceeded,
     ReadOnlySession,
     Conflict,
+    /// A conditional or transactional commit lost a race: an expected element or
+    /// graph version no longer holds, or a concurrent commit changed what a
+    /// transaction read. Nothing was written; re-read and retry.
+    VersionConflict,
     Unavailable,
 }
 
@@ -27,6 +31,7 @@ impl ErrorCode {
             Self::MemoryBudgetExceeded => "MEMORY_BUDGET_EXCEEDED",
             Self::ReadOnlySession => "READ_ONLY_SESSION",
             Self::Conflict => "CONFLICT",
+            Self::VersionConflict => "VERSION_CONFLICT",
             Self::Unavailable => "UNAVAILABLE",
         }
     }
@@ -37,7 +42,7 @@ impl ErrorCode {
             Self::Unauthorized => 401,
             Self::NotFound => 404,
             Self::ReadOnlySession => 403,
-            Self::Conflict | Self::SessionExpired => 409,
+            Self::Conflict | Self::VersionConflict | Self::SessionExpired => 409,
             Self::MemoryBudgetExceeded | Self::Unavailable | Self::SessionLoading => 503,
         }
     }

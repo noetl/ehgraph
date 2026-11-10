@@ -42,6 +42,7 @@ Every instance exposes the same tools. You choose the domain by which server you
 | `MEMORY_BUDGET_EXCEEDED` | Per-session cap or global budget |
 | `READ_ONLY_SESSION` | Write tools given a `graph_session_id` |
 | `CONFLICT` | Data dir belongs to another instance, or an idempotency key was reused with a different payload |
+| `VERSION_CONFLICT` | 409. A conditional (`expect`) or transactional commit lost a race: an expectation no longer holds, or a concurrent commit changed what the transaction read. Nothing was written; re-read and retry ([Transactions](Transactions)) |
 | `UNAVAILABLE` | Corrupt log, or a non-primary role |
 
 HTTP status follows the code (`401`, `403`, `404`, `409`, `400`, `503`). MCP still returns HTTP 200 and sets `isError`.
@@ -52,11 +53,12 @@ Read tools take `namespace` and either `graph_session_id` or `version`. With a s
 
 | Tool | Role |
 |---|---|
-| `graph.upsert` | Batch of `nodes` and `edges`. Returns the version. Same ids and same content do not bump it. |
-| `graph.deactivate` | `ids`, or `{source, not_seen_since}` plus optional `origin`. Soft-deactivate. |
+| `graph.upsert` | Batch of `nodes` and `edges`. Returns the version. Same ids and same content do not bump it. Optional `expect` makes it conditional ([Transactions](Transactions)). |
+| `graph.deactivate` | `ids`, or `{source, not_seen_since}` plus optional `origin`. Soft-deactivate. Optional `expect` (with `ids`). |
 | `graph.snapshot.create` | Arrow IPC snapshot at the current head. `scope` defaults to full. |
 | `graph.node` / `graph.edge` | One element by `id`. |
-| `graph.cypher` | openCypher subset: read and write. `query`, `params`, optional `active`, `version`/`graph_session_id` (read only), `source`, `idempotency_key`. Writes commit through `graph.upsert` + `graph.deactivate`. See [Cypher](Cypher). |
+| `graph.cypher` | openCypher subset: read and write. `query`, `params`, optional `active`, `version`/`graph_session_id` (read only), `source`, `idempotency_key`, `expect`. A write commits atomically as one version, serializably. See [Cypher](Cypher). |
+| `graph.tx.begin` / `graph.tx.run` / `graph.tx.commit` / `graph.tx.rollback` | Multi-statement transaction: snapshot reads, read-your-writes, one atomic serializable commit (`VERSION_CONFLICT` on a lost race), optional `expect`. See [Transactions](Transactions). |
 | `graph.query` | Nodes by `type`, `origin`, `props`, `active` (`true`, `false`, or `"any"`). `props` values are equality, or `{gte, gt, lte, lt}`. |
 | `graph.neighbors` | `node_id`, `direction` (`out`, `in`, `both`), optional `edge_type`. |
 | `graph.subgraph` | Directed k-hop from `seeds`. Optional `edge_types` and `max_nodes`. |

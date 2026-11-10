@@ -1,0 +1,17 @@
+[package]
+name = "ehgraph-cypher"
+description = "openCypher (GQL-aligned) query subset over the ehgraph property graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+ehgraph-core = { workspace = true }
+ehgraph-memory = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+ehgraph-store = { workspace = true }

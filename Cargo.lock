@@ -458,6 +458,7 @@ dependencies = [
  "ehgraph-api",
  "ehgraph-backup",
  "ehgraph-core",
+ "ehgraph-cypher",
  "ehgraph-memory",
  "ehgraph-store",
  "http-body-util",
@@ -476,6 +477,7 @@ version = "0.1.0"
 dependencies = [
  "ehgraph-backup",
  "ehgraph-core",
+ "ehgraph-cypher",
  "ehgraph-memory",
  "ehgraph-store",
  "serde",
@@ -507,6 +509,16 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "ehgraph-cypher"
+version = "0.1.0"
+dependencies = [
+ "ehgraph-core",
+ "ehgraph-memory",
+ "ehgraph-store",
+ "serde_json",
 ]
 
 [[package]]

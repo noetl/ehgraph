@@ -25,6 +25,8 @@ pub fn router(graph: EhGraph) -> Router {
         .route("/mcp", post(mcp))
         .route("/mcp/tools", get(tools_list))
         .route("/v1/tools/{tool}", post(http_tool))
+        .route("/v1/cypher", post(cypher_route))
+        .route("/db/{namespace}/query/v2", post(neo4j_query))
         .route("/v1/admin/backup", post(admin_backup))
         .with_state(graph)
 }
@@ -94,6 +96,112 @@ async fn http_tool(
     let g = graph.clone();
     let envelope = blocking(move || g.call_with_header(header.as_deref(), &tool, &args)).await;
     envelope_response(&graph, envelope)
+}
+
+/// `POST /v1/cypher` — the `graph.cypher` tool, same body and envelope.
+async fn cypher_route(State(graph): State<EhGraph>, headers: HeaderMap, body: String) -> Response {
+    http_tool(
+        State(graph),
+        Path("graph.cypher".to_string()),
+        headers,
+        body,
+    )
+    .await
+}
+
+/// `POST /db/{namespace}/query/v2` — shaped like the Neo4j Query API v2
+/// (`{"statement", "parameters"}` in; `{"data": {"fields", "values"}, "counters"}`
+/// out, `202 Accepted`), so HTTP Cypher clients written for it work against a
+/// namespace. The database name is the ehgraph namespace. Auth is the same bearer
+/// token as every other route.
+async fn neo4j_query(
+    State(graph): State<EhGraph>,
+    Path(namespace): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let request: Value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(err) => {
+            return neo4j_error(
+                StatusCode::BAD_REQUEST,
+                "Neo.ClientError.Request.Invalid",
+                &format!("request json: {err}"),
+            )
+        }
+    };
+    let Some(statement) = request.get("statement").and_then(Value::as_str) else {
+        return neo4j_error(
+            StatusCode::BAD_REQUEST,
+            "Neo.ClientError.Request.Invalid",
+            "`statement` is required",
+        );
+    };
+    let args = json!({
+        "namespace": namespace,
+        "query": statement,
+        "params": request.get("parameters").cloned().unwrap_or(json!({})),
+    });
+    let header = auth_header(&headers);
+    let g = graph.clone();
+    let envelope = or_failure(
+        &graph,
+        blocking(move || g.call_with_header(header.as_deref(), "graph.cypher", &args)).await,
+    );
+    if !envelope.ok {
+        let err = envelope.error.as_ref();
+        let message = err.map(|e| e.message.clone()).unwrap_or_default();
+        let code = match ehgraph_cypher::kind_of_message(&message) {
+            Some(kind) => kind.neo4j_code(),
+            None => match err.map(|e| e.code) {
+                Some(ehgraph_core::ErrorCode::Unauthorized) => {
+                    "Neo.ClientError.Security.Unauthorized"
+                }
+                Some(ehgraph_core::ErrorCode::NotFound) => {
+                    "Neo.ClientError.Database.DatabaseNotFound"
+                }
+                _ => "Neo.ClientError.Statement.ArgumentError",
+            },
+        };
+        let status = StatusCode::from_u16(err.map(|e| e.code.http_status()).unwrap_or(400))
+            .unwrap_or(StatusCode::BAD_REQUEST);
+        return neo4j_error(status, code, &message);
+    }
+    let data = envelope.data.unwrap_or(Value::Null);
+    let stats = &data["stats"];
+    let n = |key: &str| stats.get(key).and_then(Value::as_u64).unwrap_or(0);
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "data": {"fields": data["columns"], "values": data["rows"]},
+            "counters": {
+                "containsUpdates": stats.get("contains_updates").and_then(Value::as_bool).unwrap_or(false),
+                "nodesCreated": n("nodes_created"),
+                "nodesDeleted": n("nodes_deleted"),
+                "propertiesSet": n("properties_set"),
+                "relationshipsCreated": n("relationships_created"),
+                "relationshipsDeleted": n("relationships_deleted"),
+                "labelsAdded": 0,
+                "labelsRemoved": 0,
+                "indexesAdded": 0,
+                "indexesRemoved": 0,
+                "constraintsAdded": 0,
+                "constraintsRemoved": 0,
+                "containsSystemUpdates": false,
+                "systemUpdates": 0,
+            },
+            "bookmarks": [format!("ehgraph:{}:{}", namespace, envelope.graph_version.unwrap_or(0))],
+        })),
+    )
+        .into_response()
+}
+
+fn neo4j_error(status: StatusCode, code: &str, message: &str) -> Response {
+    (
+        status,
+        Json(json!({"errors": [{"code": code, "message": message}]})),
+    )
+        .into_response()
 }
 
 async fn admin_backup(State(graph): State<EhGraph>, headers: HeaderMap) -> Response {

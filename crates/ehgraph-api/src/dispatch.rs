@@ -122,6 +122,7 @@ impl Engine {
             "graph.node" => self.read_node(args, caller, now_ms),
             "graph.edge" => self.read_edge(args, caller, now_ms),
             "graph.query" => self.read_query(args, caller, now_ms),
+            "graph.cypher" => self.cypher(args, caller, now_ms),
             "graph.neighbors" => self.read_neighbors(args, caller, now_ms),
             "graph.subgraph" => self.read_subgraph(args, caller, now_ms),
             "graph.path" => self.read_path(args, caller, now_ms),
@@ -306,6 +307,134 @@ impl Engine {
             json!({"nodes": page.items}),
             page.truncated,
             page.next_cursor,
+        ))
+    }
+
+    /// openCypher subset (`docs/wiki/Cypher.md`). Reads run on the head view, a
+    /// pinned version, or a session. Updating clauses run on a copy-on-write overlay
+    /// of the head view; the net change is committed through the same paths as
+    /// `graph.upsert` (one version for all upserts) then `graph.deactivate` (one
+    /// version for all deletions), so validation, schema checks and the no-op on
+    /// identical content apply unchanged.
+    fn cypher(&self, args: &Value, caller: &Caller, now_ms: i64) -> Result<Envelope, EhError> {
+        #[derive(Deserialize)]
+        struct Args {
+            namespace: String,
+            query: String,
+            #[serde(default)]
+            params: serde_json::Map<String, Value>,
+            #[serde(default)]
+            graph_session_id: Option<String>,
+            #[serde(default)]
+            version: Option<u64>,
+            #[serde(default)]
+            active: ehgraph_core::ActiveFilter,
+            #[serde(default)]
+            source: Option<String>,
+            #[serde(default)]
+            execution_id: Option<String>,
+            #[serde(default)]
+            idempotency_key: Option<String>,
+            #[serde(default)]
+            max_rows: Option<usize>,
+        }
+        let parsed: Args = serde_json::from_value(args.clone())
+            .map_err(|err| EhError::invalid(format!("graph.cypher: {err}")))?;
+        let query = ehgraph_cypher::parse(&parsed.query)?;
+        let updating = query.is_updating();
+        self.require(caller, &parsed.namespace, updating)?;
+        if updating && (parsed.graph_session_id.is_some() || parsed.version.is_some()) {
+            return Err(EhError::new(
+                ErrorCode::ReadOnlySession,
+                "updating Cypher runs against head; drop graph_session_id and version",
+            ));
+        }
+        let params = parsed
+            .params
+            .iter()
+            .map(|(k, v)| (k.clone(), ehgraph_cypher::Val::from_json(v)))
+            .collect();
+        let write_ts = now_ms;
+        let source = parsed.source.unwrap_or_else(|| "cypher".to_string());
+        let execution_id = parsed
+            .execution_id
+            .unwrap_or_else(|| format!("cypher:{write_ts}"));
+        let opts = ehgraph_cypher::ExecOptions {
+            source: source.clone(),
+            execution_id: execution_id.clone(),
+            now_ms: write_ts,
+            max_hops: default_hops(),
+            max_rows: parsed.max_rows.unwrap_or(100_000).clamp(1, 1_000_000),
+            visibility: parsed.active,
+        };
+        let located = Located {
+            namespace: parsed.namespace.clone(),
+            graph_session_id: parsed.graph_session_id,
+            version: parsed.version,
+            id: None,
+        };
+        let run = |graph: &SessionGraph| {
+            ehgraph_cypher::execute(graph, &query, &params, &opts).map_err(EhError::from)
+        };
+        // An updating query may create the namespace, like a first `graph.upsert`.
+        let fresh = updating
+            && matches!(self.store.head(&parsed.namespace), Err(ref e) if e.code == ErrorCode::NotFound);
+        let (read_version, outcome) = if fresh {
+            ehgraph_core::validate_namespace(&parsed.namespace)?;
+            let empty = SessionGraph::from_materialized(
+                &ehgraph_store::MaterializedGraph::from_elements(0, Vec::new(), Vec::new()),
+            )?;
+            (0, run(&empty)?)
+        } else {
+            self.with_graph(&located, now_ms, run)?
+        };
+        let mut version = read_version;
+        let mut writes = Vec::new();
+        let changes = &outcome.changes;
+        if !changes.nodes.is_empty() || !changes.edges.is_empty() {
+            let result = self.store.upsert(WriteRequest {
+                namespace: parsed.namespace.clone(),
+                nodes: changes.nodes.clone(),
+                edges: changes.edges.clone(),
+                idempotency_key: parsed.idempotency_key.clone(),
+                source: source.clone(),
+                execution_id: execution_id.clone(),
+                ts_ms: write_ts,
+            })?;
+            version = result.graph_version;
+            writes.push(
+                json!({"op": "graph.upsert", "graph_version": result.graph_version,
+                "changed": result.changed, "applied": result.applied}),
+            );
+        }
+        if !changes.deactivate.is_empty() {
+            let result = self.store.deactivate(DeactivateRequest {
+                namespace: parsed.namespace.clone(),
+                ids: changes.deactivate.clone(),
+                origin: None,
+                source: None,
+                not_seen_since_ms: None,
+                idempotency_key: parsed
+                    .idempotency_key
+                    .as_ref()
+                    .map(|k| format!("{k}:deactivate")),
+                execution_id,
+                ts_ms: write_ts,
+            })?;
+            version = result.graph_version;
+            writes.push(
+                json!({"op": "graph.deactivate", "graph_version": result.graph_version,
+                "changed": result.changed, "applied": result.applied}),
+            );
+        }
+        Ok(self.done(
+            version,
+            json!({
+                "columns": outcome.columns,
+                "rows": outcome.rows_json(),
+                "stats": outcome.stats.to_json(),
+                "writes": writes,
+            }),
         ))
     }
 
@@ -902,6 +1031,21 @@ pub fn tool_specs() -> Vec<ToolSpec> {
                 ("type", "string", false),
                 ("limit", "integer", false),
                 ("graph_session_id", "string", false),
+            ]),
+        ),
+        spec(
+            "graph.cypher",
+            "Run an openCypher (GQL-aligned) query: MATCH/OPTIONAL MATCH/WHERE/WITH/UNWIND/RETURN, variable-length paths, shortestPath, CREATE/MERGE/SET/REMOVE, DELETE as soft deactivation. Labels are node types; the property `id` is the element id.",
+            object(&[
+                ("namespace", "string", true),
+                ("query", "string", true),
+                ("params", "object", false),
+                ("active", "string", false),
+                ("source", "string", false),
+                ("execution_id", "string", false),
+                ("idempotency_key", "string", false),
+                ("graph_session_id", "string", false),
+                ("version", "integer", false),
             ]),
         ),
         spec(

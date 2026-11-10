@@ -13,6 +13,7 @@ axum = { workspace = true }
 ehgraph-api = { workspace = true }
 ehgraph-backup = { workspace = true }
 ehgraph-core = { workspace = true }
+ehgraph-cypher = { workspace = true }
 ehgraph-memory = { workspace = true }
 ehgraph-store = { workspace = true }
 serde = { workspace = true }

@@ -433,7 +433,7 @@ fn children<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
             f(a);
             b.iter().chain(c.iter()).for_each(|x| f(x));
         }
-        Expr::List(items) | Expr::Func { args: items, .. } => items.iter().for_each(|x| f(x)),
+        Expr::List(items) | Expr::Func { args: items, .. } => items.iter().for_each(&mut *f),
         Expr::Map(entries) => entries.iter().for_each(|(_, x)| f(x)),
         Expr::Case {
             operand,

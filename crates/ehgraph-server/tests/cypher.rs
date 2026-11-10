@@ -653,7 +653,7 @@ async fn cypher_permissions_errors_and_sessions() {
     let (_, out) = cypher(
         app,
         "lab-writer",
-        "MATCH (n) RETURN n UNION MATCH (m) RETURN m",
+        "MATCH (n) CALL { RETURN 1 AS x } RETURN n",
         json!({}),
     )
     .await;

@@ -696,6 +696,9 @@ fn show_out(v: &Out) -> String {
 // ---------------------------------------------------------------------------
 // Running
 
+/// A scenario status and, for a pass via an error mapping, which mapping.
+type Verdict = (Status, Option<String>);
+
 type QResult = Result<(Vec<String>, Vec<Vec<Out>>), (Option<ErrorKind>, String)>;
 
 struct Ctx<'a> {
@@ -1325,7 +1328,7 @@ fn opencypher_tck() {
         .and_then(|t| t.parse().ok())
         .unwrap_or(8);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<std::sync::Mutex<Option<(Status, Option<String>)>>> =
+    let results: Vec<std::sync::Mutex<Option<Verdict>>> =
         all.iter().map(|_| std::sync::Mutex::new(None)).collect();
     std::thread::scope(|scope| {
         for _ in 0..threads.max(1) {
